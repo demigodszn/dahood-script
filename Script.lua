@@ -222,7 +222,9 @@ end
 
 local function startCamlock()
     if camlockConnection then camlockConnection:Disconnect() end
-    Camera.CameraType = Enum.CameraType.Scriptable
+    -- Stay on Custom so Roblox keeps moving the camera with your character
+    -- We only control the rotation, not the position
+    Camera.CameraType = Enum.CameraType.Custom
 
     camlockConnection = RunService.RenderStepped:Connect(function(dt)
         if not getgenv().CamlockEnabled then return end
@@ -245,6 +247,7 @@ local function startCamlock()
         local velocity = targetHRP.AssemblyLinearVelocity
         local predictedPos = targetHRP.Position + (velocity * ping) + AIM_OFFSET
 
+        -- Only rotate toward target, Roblox handles position naturally
         local currentCF = Camera.CFrame
         local alpha = 1 - (1 - SMOOTHNESS) ^ (dt * 60)
         local targetCF = CFrame.new(currentCF.Position, predictedPos)
@@ -257,7 +260,7 @@ local function stopCamlock()
         camlockConnection:Disconnect()
         camlockConnection = nil
     end
-    Camera.CameraType = Enum.CameraType.Custom
+    -- CameraType never changed so no reset needed
     getgenv().CamlockTarget = nil
 end
 
