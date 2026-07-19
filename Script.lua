@@ -29,10 +29,6 @@ local carriedCharacter = nil
 local wasCarrying = false
 local currentLookDir = nil
 
--- =============================================
--- NOTIFICATION
--- =============================================
-
 local function notify(title, text, duration)
     pcall(function()
         StarterGui:SetCore("SendNotification", {
@@ -42,10 +38,6 @@ local function notify(title, text, duration)
         })
     end)
 end
-
--- =============================================
--- HITBOX FUNCTIONS
--- =============================================
 
 local function disableAllCollision(character)
     if not character then return end
@@ -81,7 +73,6 @@ local function removeHitbox(player)
     targetPart.Size = Vector3.new(2, 2, 1)
     targetPart.CanCollide = true
     targetPart.Transparency = 1
-
     print("Hitbox removed for stomping: " .. player.Name)
 end
 
@@ -242,42 +233,42 @@ local function getPredictedPosition(targetHRP, player)
     return predicted
 end
 
--- Fixed: smallest distance wins = nearest player
-local function getNearestPlayer(exclude)
-    local nearest = nil
-    local nearestDist = math.huge
-    local localChar = LocalPlayer.Character
-    if not localChar then return nil end
-    local localHRP = localChar:FindFirstChild("HumanoidRootPart")
-    if not localHRP then return nil end
+-- Lock onto whoever is closest to the center of the screen (crosshair)
+local function getPlayerInCrosshair(exclude)
+    local bestTarget = nil
+    local bestDot = -math.huge  -- Highest dot = most centered on screen
+    local cameraLook = Camera.CFrame.LookVector
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player ~= exclude and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             if hrp and hrp:IsDescendantOf(workspace) and not isKnockedOrDead(player) then
                 if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
-                    local dist = (hrp.Position - localHRP.Position).Magnitude
-                    if dist < nearestDist then
-                        nearestDist = dist
-                        nearest = player
+                    -- Direction from camera to player
+                    local dirToPlayer = (hrp.Position - Camera.CFrame.Position).Unit
+                    -- Dot product — 1.0 = perfectly centered, -1.0 = directly behind
+                    local dot = cameraLook:Dot(dirToPlayer)
+                    if dot > bestDot then
+                        bestDot = dot
+                        bestTarget = player
                     end
                 end
             end
         end
     end
 
-    print("Nearest target: " .. (nearest and nearest.Name .. " at " .. math.floor(nearestDist) .. " studs" or "None"))
-    return nearest
+    print("Crosshair target: " .. (bestTarget and bestTarget.Name or "None") .. " dot: " .. tostring(math.floor((bestDot or 0) * 100) / 100))
+    return bestTarget
 end
 
 local function cycleTarget()
     if not getgenv().CamlockEnabled then return end
-    local newTarget = getNearestPlayer(getgenv().CamlockTarget)
+    local newTarget = getPlayerInCrosshair(getgenv().CamlockTarget)
     if newTarget then
         getgenv().CamlockTarget = newTarget
         currentLookDir = nil
     else
-        notify("Camlock", "No other targets nearby", 2)
+        notify("Camlock", "No other targets in view", 2)
     end
 end
 
@@ -291,8 +282,9 @@ local function startCamlock()
 
         local target = getgenv().CamlockTarget
 
+        -- Hard dead check every frame
         if not target or not target.Character or isKnockedOrDead(target) then
-            target = getNearestPlayer(nil)
+            target = getPlayerInCrosshair(nil)
             getgenv().CamlockTarget = target
             currentLookDir = nil
             if not target then return end
@@ -300,13 +292,14 @@ local function startCamlock()
 
         local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
         if not targetHRP or not targetHRP:IsDescendantOf(workspace) then
-            getgenv().CamlockTarget = getNearestPlayer(nil)
+            getgenv().CamlockTarget = getPlayerInCrosshair(nil)
             currentLookDir = nil
             return
         end
 
+        -- Wall check — skip frame and find visible target
         if getgenv().WallCheckEnabled and not hasLineOfSight(targetHRP) then
-            local visible = getNearestPlayer(nil)
+            local visible = getPlayerInCrosshair(nil)
             if visible and visible ~= target then
                 getgenv().CamlockTarget = visible
                 currentLookDir = nil
@@ -425,7 +418,7 @@ if UIS then
         if input.KeyCode == Enum.KeyCode.Q then
             getgenv().CamlockEnabled = not getgenv().CamlockEnabled
             if getgenv().CamlockEnabled then
-                getgenv().CamlockTarget = getNearestPlayer(nil)
+                getgenv().CamlockTarget = getPlayerInCrosshair(nil)
                 startCamlock()
                 notify("Camlock", "ON", 3)
             else
