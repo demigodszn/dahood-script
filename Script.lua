@@ -9,7 +9,7 @@ getgenv().CamlockEnabled = false
 getgenv().CamlockTarget = nil
 getgenv().WallCheckEnabled = false
 
-local SMOOTHNESS = 0.075  -- Lower = smoother
+local SMOOTHNESS = 0.075
 local AIM_OFFSET = Vector3.new(0, 1.6, 0)
 local PING_MIN = 0.059
 local PING_MAX = 0.080
@@ -23,11 +23,11 @@ local success, UIS = pcall(function() return game:GetService("UserInputService")
 
 local connections = {}
 local healthConnections = {}
-local lastVelocityCache = {}  -- For acceleration estimation
+local lastVelocityCache = {}
 local camlockConnection = nil
 local carriedCharacter = nil
 local wasCarrying = false
-local currentLookDir = nil  -- Tracked separately to kill shake
+local currentLookDir = nil
 
 -- =============================================
 -- NOTIFICATION
@@ -180,7 +180,6 @@ end
 -- CAMLOCK FUNCTIONS
 -- =============================================
 
--- Hard dead check — Da Hood sets health to 0 on knock
 local function isKnockedOrDead(player)
     if not player or not player.Character then return true end
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
@@ -188,7 +187,6 @@ local function isKnockedOrDead(player)
     return humanoid.Health <= 0
 end
 
--- Wall check via raycast from camera to target
 local function hasLineOfSight(targetHRP)
     if not getgenv().WallCheckEnabled then return true end
     local localChar = LocalPlayer.Character
@@ -203,12 +201,9 @@ local function hasLineOfSight(targetHRP)
     raycastParams.FilterDescendantsInstances = {localChar, targetHRP.Parent}
 
     local result = workspace:Raycast(origin, direction.Unit * distance, raycastParams)
-
-    -- Nil result = nothing blocking = clear line of sight
     return result == nil
 end
 
--- Acceleration estimation — tracks velocity delta per player
 local function getAcceleration(player, currentVelocity)
     local userId = player.UserId
     local now = tick()
@@ -228,21 +223,17 @@ local function getAcceleration(player, currentVelocity)
     return acceleration
 end
 
--- Dahoodian kinematic prediction:
--- pos + v*t + 0.5*a*t² — same model pro players manually replicate
 local function getPredictedPosition(targetHRP, player)
     local ping = math.clamp(LocalPlayer:GetNetworkPing(), PING_MIN, PING_MAX)
     local velocity = targetHRP.AssemblyLinearVelocity
     local acceleration = getAcceleration(player, velocity)
 
-    -- Clamp acceleration — prevents wild overshoot on sharp turns
     local clampedAccel = Vector3.new(
         math.clamp(acceleration.X, -80, 80),
         math.clamp(acceleration.Y, -80, 80),
         math.clamp(acceleration.Z, -80, 80)
     )
 
-    -- Kinematic equation with acceleration term
     local predicted = targetHRP.Position
         + (velocity * ping)
         + (0.5 * clampedAccel * ping * ping)
@@ -251,6 +242,7 @@ local function getPredictedPosition(targetHRP, player)
     return predicted
 end
 
+-- Fixed: smallest distance wins = nearest player
 local function getNearestPlayer(exclude)
     local nearest = nil
     local nearestDist = math.huge
@@ -263,7 +255,6 @@ local function getNearestPlayer(exclude)
         if player ~= LocalPlayer and player ~= exclude and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             if hrp and hrp:IsDescendantOf(workspace) and not isKnockedOrDead(player) then
-                -- Only target players with clear line of sight when wall check is on
                 if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
                     local dist = (hrp.Position - localHRP.Position).Magnitude
                     if dist < nearestDist then
@@ -274,6 +265,8 @@ local function getNearestPlayer(exclude)
             end
         end
     end
+
+    print("Nearest target: " .. (nearest and nearest.Name .. " at " .. math.floor(nearestDist) .. " studs" or "None"))
     return nearest
 end
 
@@ -282,8 +275,7 @@ local function cycleTarget()
     local newTarget = getNearestPlayer(getgenv().CamlockTarget)
     if newTarget then
         getgenv().CamlockTarget = newTarget
-        currentLookDir = nil  -- Reset direction on new target
-        notify("Camlock", "Switched to: " .. newTarget.Name, 2)
+        currentLookDir = nil
     else
         notify("Camlock", "No other targets nearby", 2)
     end
@@ -299,7 +291,6 @@ local function startCamlock()
 
         local target = getgenv().CamlockTarget
 
-        -- Hard dead check every single frame — no exceptions
         if not target or not target.Character or isKnockedOrDead(target) then
             target = getNearestPlayer(nil)
             getgenv().CamlockTarget = target
@@ -314,7 +305,6 @@ local function startCamlock()
             return
         end
 
-        -- Wall check — skip this frame and find a visible target
         if getgenv().WallCheckEnabled and not hasLineOfSight(targetHRP) then
             local visible = getNearestPlayer(nil)
             if visible and visible ~= target then
@@ -327,21 +317,14 @@ local function startCamlock()
         local predictedPos = getPredictedPosition(targetHRP, target)
         local currentCF = Camera.CFrame
 
-        -- Initialize direction on first frame or after target switch
         if not currentLookDir then
             currentLookDir = (predictedPos - currentCF.Position).Unit
         end
 
         local targetDir = (predictedPos - currentCF.Position).Unit
-
-        -- KEY SHAKE FIX:
-        -- Interpolate the DIRECTION VECTOR not the full CFrame
-        -- This decouples rotation from position jitter completely
-        -- Roblox moving the camera position no longer causes rotation shake
         local alpha = 1 - (1 - SMOOTHNESS) ^ (dt * 60)
         currentLookDir = currentLookDir:Lerp(targetDir, alpha).Unit
 
-        -- Reconstruct CFrame from position + smooth direction
         Camera.CFrame = CFrame.new(currentCF.Position, currentCF.Position + currentLookDir)
     end)
 end
@@ -439,20 +422,16 @@ end
 
 if UIS then
     UIS.InputBegan:Connect(function(input, gameProcessed)
-        -- Q — toggle camlock
         if input.KeyCode == Enum.KeyCode.Q then
             getgenv().CamlockEnabled = not getgenv().CamlockEnabled
             if getgenv().CamlockEnabled then
                 getgenv().CamlockTarget = getNearestPlayer(nil)
                 startCamlock()
-                local targetName = getgenv().CamlockTarget and getgenv().CamlockTarget.Name or "No target"
-                notify("Camlock", "ON — " .. targetName, 3)
+                notify("Camlock", "ON", 3)
             else
                 stopCamlock()
                 notify("Camlock", "OFF", 3)
             end
-
-        -- C — cycle target / toggle hitbox visibility
         elseif input.KeyCode == Enum.KeyCode.C then
             if getgenv().CamlockEnabled then
                 cycleTarget()
@@ -460,11 +439,9 @@ if UIS then
                 getgenv().HitboxVisible = not getgenv().HitboxVisible
                 updateVisibility()
             end
-
-        -- Z — toggle wall check
         elseif input.KeyCode == Enum.KeyCode.Z then
             getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
-            notify("Wall Check", getgenv().WallCheckEnabled and "ON — Won't lock through walls" or "OFF", 2)
+            notify("Wall Check", getgenv().WallCheckEnabled and "ON" or "OFF", 2)
         end
     end)
 end
