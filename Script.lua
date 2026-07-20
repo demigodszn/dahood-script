@@ -8,8 +8,7 @@ getgenv().HitboxVisible = true
 getgenv().CamlockTarget = nil
 getgenv().WallCheckEnabled = false
 
--- Less smooth = more precise/snappy
-local SMOOTHNESS = 0.12
+local SMOOTHNESS = 0.095
 local AIM_OFFSET = Vector3.new(0, 1.6, 0)
 local PING_MIN = 0.059
 local PING_MAX = 0.080
@@ -24,13 +23,11 @@ local Camera = workspace.CurrentCamera
 local connections = {}
 local healthConnections = {}
 local lastVelocityCache = {}
-local camlockBound = false
 local carriedCharacter = nil
 local wasCarrying = false
-local currentLookDir = nil
 
 -- =============================================
--- NOTIFICATION
+-- NOTIFICATION — LOAD ONLY
 -- =============================================
 
 local function notify(title, text, duration)
@@ -44,7 +41,7 @@ local function notify(title, text, duration)
 end
 
 -- =============================================
--- GUI — Q BUTTON ONLY
+-- GUI — Q BUTTON
 -- =============================================
 
 local existingGui = LocalPlayer.PlayerGui:FindFirstChild("DemigodGui")
@@ -198,7 +195,6 @@ local function updateVisibility()
             end
         end
     end
-    notify("Hitbox", "Visibility: " .. (getgenv().HitboxVisible and "Visible" or "Invisible"), 2)
 end
 
 -- =============================================
@@ -287,27 +283,19 @@ local function getPlayerInCrosshair(exclude)
     return bestTarget
 end
 
-local function releaseTarget(reason)
+local function releaseTarget()
     getgenv().CamlockTarget = nil
-    currentLookDir = nil
     updateQBtn(false)
-    if reason then
-        notify("Camlock", reason, 2)
-    end
 end
 
 local function handleQ()
     if getgenv().CamlockTarget then
-        releaseTarget("Released")
+        releaseTarget()
     else
         local target = getPlayerInCrosshair(nil)
         if target then
             getgenv().CamlockTarget = target
-            currentLookDir = nil
             updateQBtn(true)
-            notify("Camlock", "Locked", 2)
-        else
-            notify("Camlock", "No target in view", 2)
         end
     end
 end
@@ -318,66 +306,57 @@ end)
 
 -- =============================================
 -- CAMLOCK LOOP
--- KEY FIX: BindToRenderStep at Camera priority + 1
--- This runs AFTER Roblox updates the camera position
--- for character movement — so Roblox moves the camera
--- to follow your character first, THEN we rotate it
--- toward the target. Character never leaves screen.
--- Camera never freezes on fast movement.
+-- FIX: Read LookVector fresh every frame from
+-- Roblox's already-updated camera — no caching.
+-- Roblox moves position first (Camera priority),
+-- we rotate after (Camera + 1). Position always
+-- follows character. Camera never freezes.
 -- =============================================
-
-Camera.CameraType = Enum.CameraType.Custom
 
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
     if not getgenv().CamlockTarget then return end
 
     local target = getgenv().CamlockTarget
 
-    -- Hard dead check
+    -- Dead check — release immediately on 0 hp
     if not target.Character then
-        releaseTarget("Released — Target lost")
+        releaseTarget()
         return
     end
 
     local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 then
-        releaseTarget("Released — Target down")
+        releaseTarget()
         return
     end
 
     local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
     if not targetHRP or not targetHRP:IsDescendantOf(workspace) then
-        releaseTarget("Released — Target lost")
+        releaseTarget()
         return
     end
 
     if getgenv().WallCheckEnabled and not hasLineOfSight(targetHRP) then return end
 
-    -- Predicted position
     local predictedPos = getPredictedPosition(targetHRP, target)
 
-    -- Read camera AFTER Roblox already moved it for character movement
-    -- This is the crucial fix — position is already correct, we only change look
+    -- Read fresh every frame — Roblox already moved camPos for character movement
     local currentCF = Camera.CFrame
     local camPos = currentCF.Position
+    local currentLook = currentCF.LookVector
 
-    -- Direction from current camera position to predicted target position
-    local targetDir = (predictedPos - camPos)
+    local targetDir = (predictedPos - camPos).Unit
 
-    -- FORCEHIT: if target is very close to crosshair, snap harder
-    local currentDir = currentCF.LookVector
-    local dot = currentDir:Dot(targetDir.Unit)
-    local forcehitAlpha = dot > 0.98 and 1 or SMOOTHNESS
+    -- Forcehit: snap to 1 when nearly on target
+    local dot = currentLook:Dot(targetDir)
+    local alpha = dot > 0.98
+        and 1
+        or 1 - (1 - SMOOTHNESS) ^ (dt * 60)
 
-    if not currentLookDir then
-        currentLookDir = currentDir
-    end
+    local newLook = currentLook:Lerp(targetDir, alpha).Unit
 
-    local alpha = 1 - (1 - forcehitAlpha) ^ (dt * 60)
-    currentLookDir = currentLookDir:Lerp(targetDir.Unit, alpha).Unit
-
-    -- Only rotate, never touch position — Roblox owns the position
-    Camera.CFrame = CFrame.new(camPos, camPos + currentLookDir)
+    -- Only rotation. Position is Roblox's — never touched.
+    Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
 
 -- =============================================
@@ -471,7 +450,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         updateVisibility()
     elseif input.KeyCode == Enum.KeyCode.Z then
         getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
-        notify("Wall Check", getgenv().WallCheckEnabled and "ON" or "OFF", 2)
     end
 end)
 
