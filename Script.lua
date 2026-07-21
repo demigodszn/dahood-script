@@ -26,23 +26,11 @@ local lastVelocityCache = {}
 local carriedCharacter = nil
 local wasCarrying = false
 
--- =============================================
--- NOTIFICATION
--- =============================================
-
 local function notify(title, text, duration)
     pcall(function()
-        StarterGui:SetCore("SendNotification", {
-            Title = title,
-            Text = text,
-            Duration = duration or 3
-        })
+        StarterGui:SetCore("SendNotification", {Title = title, Text = text, Duration = duration or 3})
     end)
 end
-
--- =============================================
--- GUI — Q BUTTON
--- =============================================
 
 local existingGui = LocalPlayer.PlayerGui:FindFirstChild("DemigodGui")
 if existingGui then existingGui:Destroy() end
@@ -88,16 +76,10 @@ local function updateQBtn(locked)
     end
 end
 
--- =============================================
--- HITBOX FUNCTIONS
--- =============================================
-
 local function disableAllCollision(character)
     if not character then return end
     for _, part in ipairs(character:GetDescendants()) do
-        if part:IsA("BasePart") then
-            part.CanCollide = false
-        end
+        if part:IsA("BasePart") then part.CanCollide = false end
     end
 end
 
@@ -114,72 +96,61 @@ local function removeHitbox(player)
     if not player.Character then return end
     local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
     if not targetPart or not targetPart:IsA("BasePart") then return end
-
     local userId = player.UserId
     if connections[userId] then
-        for _, conn in ipairs(connections[userId]) do
-            conn:Disconnect()
-        end
+        for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
         connections[userId] = {}
     end
-
     targetPart.Size = Vector3.new(2, 2, 1)
     targetPart.CanCollide = true
     targetPart.Transparency = 1
 end
 
+-- FIX #5: disconnect stale connections up front, before checking
+-- health/existence — prevents a fast respawn inside the 5s validation
+-- window from leaving dead connections pointed at a destroyed instance
 local function applyHitbox(player)
-    if not getgenv().Enabled or player == LocalPlayer then return end
+    if player == LocalPlayer then return end
+    local userId = player.UserId
+    if connections[userId] then
+        for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
+        connections[userId] = {}
+    end
+
+    if not getgenv().Enabled then return end
     if not player.Character then return end
 
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if humanoid and humanoid.Health <= 0 then return end
-
     local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
     if not targetPart or not targetPart:IsA("BasePart") then return end
 
     targetPart.Size = getgenv().HitboxSize
+    -- FIX #2: respect current visibility setting, not just default
     targetPart.Transparency = getgenv().HitboxVisible and 0.5 or 1
     targetPart.CanCollide = false
-
     disableAllCollision(player.Character)
 
-    local userId = player.UserId
-    if connections[userId] then
-        for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
-    end
-    connections[userId] = {}
-
     table.insert(connections[userId], targetPart:GetPropertyChangedSignal("Size"):Connect(function()
-        if targetPart.Size ~= getgenv().HitboxSize then
-            targetPart.Size = getgenv().HitboxSize
-        end
+        if targetPart.Size ~= getgenv().HitboxSize then targetPart.Size = getgenv().HitboxSize end
     end))
-
     table.insert(connections[userId], targetPart:GetPropertyChangedSignal("CanCollide"):Connect(function()
-        if targetPart.CanCollide ~= false then
-            targetPart.CanCollide = false
-        end
+        if targetPart.CanCollide ~= false then targetPart.CanCollide = false end
     end))
 end
 
 local function setupHealthWatch(player)
     if player == LocalPlayer then return end
-
     local userId = player.UserId
     if healthConnections[userId] then
         healthConnections[userId]:Disconnect()
         healthConnections[userId] = nil
     end
-
     if not player.Character then return end
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return end
-
     healthConnections[userId] = humanoid:GetPropertyChangedSignal("Health"):Connect(function()
-        if humanoid.Health <= 0 then
-            removeHitbox(player)
-        end
+        if humanoid.Health <= 0 then removeHitbox(player) end
     end)
 end
 
@@ -197,21 +168,6 @@ local function updateVisibility()
     end
 end
 
--- =============================================
--- CAMLOCK — FULL REBUILD
--- Root cause of all prior issues:
--- CameraType.Scriptable froze the camera position
--- so character movement couldn't move it.
--- Fix: stay on Custom so Roblox owns position.
--- We only ever write LookVector, never Position.
--- BindToRenderStep at Camera+1 so we run AFTER
--- Roblox finishes moving the camera for character,
--- meaning position is always correct before we touch it.
--- No state cached between frames — read fresh every tick.
--- Death check fires inside the render loop so it's
--- frame-accurate, not event-delayed.
--- =============================================
-
 local function isKnockedOrDead(player)
     if not player or not player.Character then return true end
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
@@ -223,30 +179,24 @@ local function hasLineOfSight(targetHRP)
     if not getgenv().WallCheckEnabled then return true end
     local localChar = LocalPlayer.Character
     if not localChar then return false end
-
     local origin = Camera.CFrame.Position
     local direction = targetHRP.Position - origin
-
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = {localChar, targetHRP.Parent}
-
     return workspace:Raycast(origin, direction.Unit * direction.Magnitude, params) == nil
 end
 
 local function getAcceleration(player, velocity)
     local userId = player.UserId
     local now = tick()
-
     if not lastVelocityCache[userId] then
         lastVelocityCache[userId] = {velocity = velocity, time = now}
         return Vector3.zero
     end
-
     local cached = lastVelocityCache[userId]
     local dt = now - cached.time
     if dt <= 0 then return Vector3.zero end
-
     local accel = (velocity - cached.velocity) / dt
     lastVelocityCache[userId] = {velocity = velocity, time = now}
     return accel
@@ -256,19 +206,15 @@ local function getPredictedPosition(targetHRP, player)
     local ping = math.clamp(LocalPlayer:GetNetworkPing(), PING_MIN, PING_MAX)
     local vel = targetHRP.AssemblyLinearVelocity
     local accel = getAcceleration(player, vel)
-
     local ca = Vector3.new(
         math.clamp(accel.X, -80, 80),
         math.clamp(accel.Y, -80, 80),
         math.clamp(accel.Z, -80, 80)
     )
-
-    return targetHRP.Position
-        + vel * ping
-        + 0.5 * ca * ping * ping
-        + AIM_OFFSET
+    return targetHRP.Position + vel * ping + 0.5 * ca * ping * ping + AIM_OFFSET
 end
 
+-- FIX #1: removed unused lastBestDot — was declared, never read
 local function getPlayerInCrosshair(exclude)
     local best = nil
     local bestDot = -math.huge
@@ -302,7 +248,7 @@ local function handleQ()
         releaseTarget()
     else
         local target = getPlayerInCrosshair(nil)
-        if target then
+        if target and target ~= LocalPlayer then
             getgenv().CamlockTarget = target
             updateQBtn(true)
         end
@@ -311,97 +257,60 @@ end
 
 qBtn.MouseButton1Click:Connect(handleQ)
 
--- Camera stays Custom the entire time
--- Roblox controls position, we control rotation only
 Camera.CameraType = Enum.CameraType.Custom
-
--- Unbind if reinjecting
-pcall(function()
-    RunService:UnbindFromRenderStep("DemigodCamlock")
-end)
+pcall(function() RunService:UnbindFromRenderStep("DemigodCamlock") end)
 
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
-    -- No target = nothing to do
     if not getgenv().CamlockTarget then return end
-
     local target = getgenv().CamlockTarget
 
-    -- Frame-accurate death check
-    if not target.Character then
-        releaseTarget(); return
+    if target == LocalPlayer then
+        releaseTarget()
+        return
     end
 
+    if not target.Character then releaseTarget(); return end
     local hum = target.Character:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then
-        releaseTarget(); return
-    end
-
+    if not hum or hum.Health <= 0 then releaseTarget(); return end
     local hrp = target.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp or not hrp:IsDescendantOf(workspace) then
-        releaseTarget(); return
-    end
-
+    if not hrp or not hrp:IsDescendantOf(workspace) then releaseTarget(); return end
     if getgenv().WallCheckEnabled and not hasLineOfSight(hrp) then return end
 
-    -- Read camera state AFTER Roblox moved it for character
-    -- camPos is already correct — Roblox handled it at Camera priority
-    -- We never write to Position, only to the look direction
     local camCF = Camera.CFrame
     local camPos = camCF.Position
     local currentLook = camCF.LookVector
-
     local predicted = getPredictedPosition(hrp, target)
-    local toTarget = (predicted - camPos)
-
-    -- Don't touch camera if target is behind us — prevents flip
+    local toTarget = predicted - camPos
     if toTarget.Magnitude < 0.1 then return end
 
     local targetDir = toTarget.Unit
-
-    -- Forcehit: snap fully when crosshair is nearly on target
     local dot = currentLook:Dot(targetDir)
-    local alpha = dot > 0.98
-        and 1
-        or 1 - (1 - SMOOTHNESS) ^ (dt * 60)
-
+    local alpha = dot > 0.98 and 1 or 1 - (1 - SMOOTHNESS) ^ (dt * 60)
     local newLook = currentLook:Lerp(targetDir, alpha)
-
-    -- Zero-length guard
     if newLook.Magnitude < 0.001 then return end
 
-    -- Write rotation only — position is untouched
     Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
-
--- =============================================
--- CARRY DETECTION
--- =============================================
 
 local function getCarriedCharacter()
     local character = LocalPlayer.Character
     if not character then return nil end
     local hrp = character:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
-
     for _, weld in ipairs(hrp:GetChildren()) do
         if weld:IsA("WeldConstraint") or weld:IsA("Weld") or weld:IsA("Motor6D") then
             local otherPart = weld:IsA("WeldConstraint") and weld.Part1 or weld.Part1
-            if otherPart and otherPart.Parent ~= character then
-                return otherPart.Parent
-            end
+            if otherPart and otherPart.Parent ~= character then return otherPart.Parent end
         end
     end
-
     for _, weld in ipairs(character:GetDescendants()) do
         if weld:IsA("WeldConstraint") or weld:IsA("Weld") then
             local otherPart = weld:IsA("WeldConstraint") and weld.Part1 or weld.Part1
-            if otherPart and otherPart.Parent ~= character
-                and otherPart.Parent:FindFirstChildOfClass("Humanoid") then
+            if otherPart and otherPart.Parent ~= character and otherPart.Parent:FindFirstChildOfClass("Humanoid") then
                 return otherPart.Parent
             end
         end
     end
-
     return nil
 end
 
@@ -411,7 +320,6 @@ task.spawn(function()
         local character = LocalPlayer.Character
         local detected = getCarriedCharacter()
         local carrying = detected ~= nil
-
         if carrying and not wasCarrying then
             disableAllCollision(character)
             disableAllCollision(detected)
@@ -429,32 +337,21 @@ task.spawn(function()
     end
 end)
 
--- =============================================
--- VALIDATION
--- =============================================
-
 local function validateHitboxes()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local hum = player.Character:FindFirstChildOfClass("Humanoid")
             if hum and hum.Health <= 0 then continue end
-
             local tp = player.Character:FindFirstChild(getgenv().TargetPart)
             if tp and tp:IsA("BasePart") then
                 local sizeMatch = tp.Size.X == getgenv().HitboxSize.X
                     and tp.Size.Y == getgenv().HitboxSize.Y
                     and tp.Size.Z == getgenv().HitboxSize.Z
-                if not sizeMatch or tp.CanCollide ~= false then
-                    applyHitbox(player)
-                end
+                if not sizeMatch or tp.CanCollide ~= false then applyHitbox(player) end
             end
         end
     end
 end
-
--- =============================================
--- KEYBINDS
--- =============================================
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
@@ -468,34 +365,30 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
--- =============================================
--- PLAYER SETUP
--- =============================================
-
+-- FIX #2: call updateVisibility after initial apply so a player
+-- who joins while hitboxes are set to invisible loads correctly
 local function setupPlayer(player)
     if player == LocalPlayer then return end
-
     if player.Character then
-        task.wait(0.5)
-        applyHitbox(player)
-        setupHealthWatch(player)
+        task.spawn(function()
+            applyHitbox(player)
+            setupHealthWatch(player)
+            updateVisibility()
+        end)
     end
-
     player.CharacterAdded:Connect(function()
-        task.wait(0.5)
+        task.wait(0.3)
         applyHitbox(player)
         setupHealthWatch(player)
+        updateVisibility()
     end)
 end
 
-Players.PlayerAdded:Connect(function(player)
-    setupPlayer(player)
-end)
+Players.PlayerAdded:Connect(setupPlayer)
+for _, player in ipairs(Players:GetPlayers()) do setupPlayer(player) end
 
-for _, player in ipairs(Players:GetPlayers()) do
-    setupPlayer(player)
-end
-
+-- FIX #6: clear carriedCharacter if the carried player disconnects
+-- mid-carry, so wasCarrying doesn't stay stuck true forever
 Players.PlayerRemoving:Connect(function(player)
     local userId = player.UserId
     if connections[userId] then
@@ -507,6 +400,10 @@ Players.PlayerRemoving:Connect(function(player)
         healthConnections[userId] = nil
     end
     lastVelocityCache[userId] = nil
+    if carriedCharacter and player.Character == carriedCharacter then
+        carriedCharacter = nil
+        wasCarrying = false
+    end
 end)
 
 task.spawn(function()
@@ -518,4 +415,3 @@ end)
 
 updateQBtn(false)
 notify("Demigod 🌟", "Loaded — Q: Lock | C: Visibility | Z: Wall Check", 5)
-print("Demigod script loaded")
