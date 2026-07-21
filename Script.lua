@@ -1,5 +1,5 @@
 -- =============================================
--- HITBOX + STREAMABLE CAMLOCK + PING PREDICTION
+-- HITBOX + CAMLOCK + PING PREDICTION
 -- =============================================
 getgenv().HitboxSize = Vector3.new(8, 8, 8)
 getgenv().TargetPart = "HumanoidRootPart"
@@ -27,7 +27,7 @@ local carriedCharacter = nil
 local wasCarrying = false
 
 -- =============================================
--- NOTIFICATION — LOAD ONLY
+-- NOTIFICATION
 -- =============================================
 
 local function notify(title, text, duration)
@@ -198,7 +198,18 @@ local function updateVisibility()
 end
 
 -- =============================================
--- CAMLOCK FUNCTIONS
+-- CAMLOCK — FULL REBUILD
+-- Root cause of all prior issues:
+-- CameraType.Scriptable froze the camera position
+-- so character movement couldn't move it.
+-- Fix: stay on Custom so Roblox owns position.
+-- We only ever write LookVector, never Position.
+-- BindToRenderStep at Camera+1 so we run AFTER
+-- Roblox finishes moving the camera for character,
+-- meaning position is always correct before we touch it.
+-- No state cached between frames — read fresh every tick.
+-- Death check fires inside the render loop so it's
+-- frame-accurate, not event-delayed.
 -- =============================================
 
 local function isKnockedOrDead(player)
@@ -215,72 +226,70 @@ local function hasLineOfSight(targetHRP)
 
     local origin = Camera.CFrame.Position
     local direction = targetHRP.Position - origin
-    local distance = direction.Magnitude
 
-    local raycastParams = RaycastParams.new()
-    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-    raycastParams.FilterDescendantsInstances = {localChar, targetHRP.Parent}
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {localChar, targetHRP.Parent}
 
-    local result = workspace:Raycast(origin, direction.Unit * distance, raycastParams)
-    return result == nil
+    return workspace:Raycast(origin, direction.Unit * direction.Magnitude, params) == nil
 end
 
-local function getAcceleration(player, currentVelocity)
+local function getAcceleration(player, velocity)
     local userId = player.UserId
     local now = tick()
 
     if not lastVelocityCache[userId] then
-        lastVelocityCache[userId] = {velocity = currentVelocity, time = now}
-        return Vector3.new(0, 0, 0)
+        lastVelocityCache[userId] = {velocity = velocity, time = now}
+        return Vector3.zero
     end
 
     local cached = lastVelocityCache[userId]
     local dt = now - cached.time
-    if dt <= 0 then return Vector3.new(0, 0, 0) end
+    if dt <= 0 then return Vector3.zero end
 
-    local acceleration = (currentVelocity - cached.velocity) / dt
-    lastVelocityCache[userId] = {velocity = currentVelocity, time = now}
-    return acceleration
+    local accel = (velocity - cached.velocity) / dt
+    lastVelocityCache[userId] = {velocity = velocity, time = now}
+    return accel
 end
 
 local function getPredictedPosition(targetHRP, player)
     local ping = math.clamp(LocalPlayer:GetNetworkPing(), PING_MIN, PING_MAX)
-    local velocity = targetHRP.AssemblyLinearVelocity
-    local acceleration = getAcceleration(player, velocity)
+    local vel = targetHRP.AssemblyLinearVelocity
+    local accel = getAcceleration(player, vel)
 
-    local clampedAccel = Vector3.new(
-        math.clamp(acceleration.X, -80, 80),
-        math.clamp(acceleration.Y, -80, 80),
-        math.clamp(acceleration.Z, -80, 80)
+    local ca = Vector3.new(
+        math.clamp(accel.X, -80, 80),
+        math.clamp(accel.Y, -80, 80),
+        math.clamp(accel.Z, -80, 80)
     )
 
     return targetHRP.Position
-        + (velocity * ping)
-        + (0.5 * clampedAccel * ping * ping)
+        + vel * ping
+        + 0.5 * ca * ping * ping
         + AIM_OFFSET
 end
 
 local function getPlayerInCrosshair(exclude)
-    local bestTarget = nil
+    local best = nil
     local bestDot = -math.huge
-    local cameraLook = Camera.CFrame.LookVector
+    local look = Camera.CFrame.LookVector
+    local camPos = Camera.CFrame.Position
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player ~= exclude and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             if hrp and hrp:IsDescendantOf(workspace) and not isKnockedOrDead(player) then
                 if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
-                    local dirToPlayer = (hrp.Position - Camera.CFrame.Position).Unit
-                    local dot = cameraLook:Dot(dirToPlayer)
+                    local dot = look:Dot((hrp.Position - camPos).Unit)
                     if dot > bestDot then
                         bestDot = dot
-                        bestTarget = player
+                        best = player
                     end
                 end
             end
         end
     end
-    return bestTarget
+    return best
 end
 
 local function releaseTarget()
@@ -300,62 +309,67 @@ local function handleQ()
     end
 end
 
-qBtn.MouseButton1Click:Connect(function()
-    handleQ()
+qBtn.MouseButton1Click:Connect(handleQ)
+
+-- Camera stays Custom the entire time
+-- Roblox controls position, we control rotation only
+Camera.CameraType = Enum.CameraType.Custom
+
+-- Unbind if reinjecting
+pcall(function()
+    RunService:UnbindFromRenderStep("DemigodCamlock")
 end)
 
--- =============================================
--- CAMLOCK LOOP
--- FIX: Read LookVector fresh every frame from
--- Roblox's already-updated camera — no caching.
--- Roblox moves position first (Camera priority),
--- we rotate after (Camera + 1). Position always
--- follows character. Camera never freezes.
--- =============================================
-
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
+    -- No target = nothing to do
     if not getgenv().CamlockTarget then return end
 
     local target = getgenv().CamlockTarget
 
-    -- Dead check — release immediately on 0 hp
+    -- Frame-accurate death check
     if not target.Character then
-        releaseTarget()
-        return
+        releaseTarget(); return
     end
 
-    local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
-    if not humanoid or humanoid.Health <= 0 then
-        releaseTarget()
-        return
+    local hum = target.Character:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        releaseTarget(); return
     end
 
-    local targetHRP = target.Character:FindFirstChild("HumanoidRootPart")
-    if not targetHRP or not targetHRP:IsDescendantOf(workspace) then
-        releaseTarget()
-        return
+    local hrp = target.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not hrp:IsDescendantOf(workspace) then
+        releaseTarget(); return
     end
 
-    if getgenv().WallCheckEnabled and not hasLineOfSight(targetHRP) then return end
+    if getgenv().WallCheckEnabled and not hasLineOfSight(hrp) then return end
 
-    local predictedPos = getPredictedPosition(targetHRP, target)
+    -- Read camera state AFTER Roblox moved it for character
+    -- camPos is already correct — Roblox handled it at Camera priority
+    -- We never write to Position, only to the look direction
+    local camCF = Camera.CFrame
+    local camPos = camCF.Position
+    local currentLook = camCF.LookVector
 
-    -- Read fresh every frame — Roblox already moved camPos for character movement
-    local currentCF = Camera.CFrame
-    local camPos = currentCF.Position
-    local currentLook = currentCF.LookVector
+    local predicted = getPredictedPosition(hrp, target)
+    local toTarget = (predicted - camPos)
 
-    local targetDir = (predictedPos - camPos).Unit
+    -- Don't touch camera if target is behind us — prevents flip
+    if toTarget.Magnitude < 0.1 then return end
 
-    -- Forcehit: snap to 1 when nearly on target
+    local targetDir = toTarget.Unit
+
+    -- Forcehit: snap fully when crosshair is nearly on target
     local dot = currentLook:Dot(targetDir)
     local alpha = dot > 0.98
         and 1
         or 1 - (1 - SMOOTHNESS) ^ (dt * 60)
 
-    local newLook = currentLook:Lerp(targetDir, alpha).Unit
+    local newLook = currentLook:Lerp(targetDir, alpha)
 
-    -- Only rotation. Position is Roblox's — never touched.
+    -- Zero-length guard
+    if newLook.Magnitude < 0.001 then return end
+
+    -- Write rotation only — position is untouched
     Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
 
@@ -381,7 +395,8 @@ local function getCarriedCharacter()
     for _, weld in ipairs(character:GetDescendants()) do
         if weld:IsA("WeldConstraint") or weld:IsA("Weld") then
             local otherPart = weld:IsA("WeldConstraint") and weld.Part1 or weld.Part1
-            if otherPart and otherPart.Parent ~= character and otherPart.Parent:FindFirstChildOfClass("Humanoid") then
+            if otherPart and otherPart.Parent ~= character
+                and otherPart.Parent:FindFirstChildOfClass("Humanoid") then
                 return otherPart.Parent
             end
         end
@@ -421,15 +436,15 @@ end)
 local function validateHitboxes()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
-            local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-            if humanoid and humanoid.Health <= 0 then continue end
+            local hum = player.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health <= 0 then continue end
 
-            local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
-            if targetPart and targetPart:IsA("BasePart") then
-                local sizeMatch = targetPart.Size.X == getgenv().HitboxSize.X
-                    and targetPart.Size.Y == getgenv().HitboxSize.Y
-                    and targetPart.Size.Z == getgenv().HitboxSize.Z
-                if not sizeMatch or targetPart.CanCollide ~= false then
+            local tp = player.Character:FindFirstChild(getgenv().TargetPart)
+            if tp and tp:IsA("BasePart") then
+                local sizeMatch = tp.Size.X == getgenv().HitboxSize.X
+                    and tp.Size.Y == getgenv().HitboxSize.Y
+                    and tp.Size.Z == getgenv().HitboxSize.Z
+                if not sizeMatch or tp.CanCollide ~= false then
                     applyHitbox(player)
                 end
             end
