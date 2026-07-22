@@ -12,6 +12,7 @@ local SMOOTHNESS = 0.095
 local AIM_OFFSET = Vector3.new(0, 1.6, 0)
 local PING_MIN = 0.059
 local PING_MAX = 0.080
+local KNOCK_THRESHOLD = 2 -- was 0, Da Hood knock can settle at 1-2
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -41,10 +42,10 @@ screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
 screenGui.Parent = LocalPlayer.PlayerGui
 
--- Q Button
+-- Q Button — bottom center area, shifted left of C
 local qFrame = Instance.new("Frame")
 qFrame.Size = UDim2.new(0, 50, 0, 50)
-qFrame.Position = UDim2.new(0.5, -25, 1, -120)
+qFrame.Position = UDim2.new(0.5, -55, 1, -120)
 qFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 qFrame.BackgroundTransparency = 0.3
 qFrame.Active = true
@@ -77,10 +78,10 @@ local function updateQBtn(locked)
     end
 end
 
--- C Button
+-- C Button — bottom center area, right next to Q
 local cFrame = Instance.new("Frame")
 cFrame.Size = UDim2.new(0, 50, 0, 50)
-cFrame.Position = UDim2.new(0.5, 35, 1, -120)
+cFrame.Position = UDim2.new(0.5, 5, 1, -120)
 cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
 cFrame.BackgroundTransparency = 0.3
 cFrame.Active = true
@@ -150,7 +151,7 @@ local function applyHitbox(player)
     if not player.Character then return end
 
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-    if humanoid and humanoid.Health <= 0 then return end
+    if humanoid and humanoid.Health <= KNOCK_THRESHOLD then return end
 
     local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
     if not targetPart or not targetPart:IsA("BasePart") then return end
@@ -185,7 +186,7 @@ local function setupHealthWatch(player)
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return end
     healthConnections[userId] = humanoid:GetPropertyChangedSignal("Health"):Connect(function()
-        if humanoid.Health <= 0 then removeHitbox(player) end
+        if humanoid.Health <= KNOCK_THRESHOLD then removeHitbox(player) end
     end)
 end
 
@@ -193,7 +194,7 @@ local function updateVisibility()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-            if humanoid and humanoid.Health > 0 then
+            if humanoid and humanoid.Health > KNOCK_THRESHOLD then
                 local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
                 if targetPart and targetPart:IsA("BasePart") then
                     targetPart.Transparency = getgenv().HitboxVisible and 0.5 or 1
@@ -211,6 +212,11 @@ end)
 
 -- =============================================
 -- CAMLOCK
+-- FIX: knock threshold raised from 0 to 2 everywhere.
+-- FIX: shake removed — no more binary snap-to-1 when
+-- dot > 0.98. Replaced with a continuous alpha curve
+-- that increases smoothly as you approach the target
+-- instead of jumping, which was causing oscillation.
 -- =============================================
 
 local function isKnockedOrDead(player)
@@ -219,7 +225,7 @@ local function isKnockedOrDead(player)
     if not humanoid then return true end
     local ok, health = pcall(function() return humanoid.Health end)
     if not ok then return true end
-    return health <= 0
+    return health <= KNOCK_THRESHOLD
 end
 
 local function hasLineOfSight(targetHRP)
@@ -261,6 +267,8 @@ local function getPredictedPosition(targetHRP, player)
     return targetHRP.Position + vel * ping + 0.5 * ca * ping * ping + AIM_OFFSET
 end
 
+-- Only ever called from handleQ — never from inside the render loop.
+-- This is what prevents a locked target from being silently swapped.
 local function getPlayerInCrosshair()
     local best, bestDot = nil, -math.huge
     local look = Camera.CFrame.LookVector
@@ -317,13 +325,18 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     if not target.Character then releaseTarget(); return end
 
     local hum = target.Character:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then releaseTarget(); return end
+    if not hum then releaseTarget(); return end
+
+    local ok, health = pcall(function() return hum.Health end)
+    if not ok or health <= KNOCK_THRESHOLD then releaseTarget(); return end
 
     local hrp = target.Character:FindFirstChild("HumanoidRootPart")
     if not hrp or not hrp:IsDescendantOf(workspace) then releaseTarget(); return end
 
     if getgenv().WallCheckEnabled and not hasLineOfSight(hrp) then return end
 
+    -- Position always read fresh, after Roblox already moved the camera
+    -- for character movement. Never cached, never touched by us.
     local camCF = Camera.CFrame
     local camPos = camCF.Position
     local currentLook = camCF.LookVector
@@ -334,10 +347,17 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
 
     local targetDir = toTarget.Unit
     local dot = currentLook:Dot(targetDir)
-    local alpha = dot > 0.98 and 1 or 1 - (1 - SMOOTHNESS) ^ (dt * 60)
-    local newLook = currentLook:Lerp(targetDir, alpha)
 
+    -- SHAKE FIX: no more binary snap. Alpha now scales continuously
+    -- with how close the dot already is — approaches 1 smoothly as
+    -- you near-perfectly align, instead of jumping there and back.
+    local closeness = math.clamp((dot - 0.9) / 0.1, 0, 1) -- 0 at dot=0.9, 1 at dot=1.0
+    local baseAlpha = 1 - (1 - SMOOTHNESS) ^ (dt * 60)
+    local alpha = baseAlpha + (1 - baseAlpha) * closeness * 0.6 -- capped boost, never a hard 1
+
+    local newLook = currentLook:Lerp(targetDir, alpha)
     if newLook.Magnitude < 0.001 then return end
+
     Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
 
@@ -403,7 +423,7 @@ local function validateHitboxes()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local hum = player.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health <= 0 then continue end
+            if hum and hum.Health <= KNOCK_THRESHOLD then continue end
             local tp = player.Character:FindFirstChild(getgenv().TargetPart)
             if tp and tp:IsA("BasePart") then
                 local sizeMatch = tp.Size.X == getgenv().HitboxSize.X
