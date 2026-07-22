@@ -41,6 +41,7 @@ screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
 screenGui.Parent = LocalPlayer.PlayerGui
 
+-- Q Button
 local qFrame = Instance.new("Frame")
 qFrame.Size = UDim2.new(0, 50, 0, 50)
 qFrame.Position = UDim2.new(0.5, -25, 1, -120)
@@ -76,6 +77,42 @@ local function updateQBtn(locked)
     end
 end
 
+-- C Button
+local cFrame = Instance.new("Frame")
+cFrame.Size = UDim2.new(0, 50, 0, 50)
+cFrame.Position = UDim2.new(0.5, 35, 1, -120)
+cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+cFrame.BackgroundTransparency = 0.3
+cFrame.Active = true
+cFrame.Parent = screenGui
+Instance.new("UICorner", cFrame).CornerRadius = UDim.new(1, 0)
+
+local cBtn = Instance.new("TextButton")
+cBtn.Size = UDim2.new(1, 0, 1, 0)
+cBtn.BackgroundTransparency = 1
+cBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+cBtn.Text = "C"
+cBtn.Font = Enum.Font.GothamBold
+cBtn.TextSize = 22
+cBtn.Parent = cFrame
+
+local cDot = Instance.new("Frame")
+cDot.Size = UDim2.new(0, 10, 0, 10)
+cDot.Position = UDim2.new(1, -2, 0, -2)
+cDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
+cDot.Parent = cFrame
+Instance.new("UICorner", cDot).CornerRadius = UDim.new(1, 0)
+
+local function updateCBtn()
+    if getgenv().HitboxVisible then
+        cFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
+        cDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
+    else
+        cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        cDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+    end
+end
+
 local function disableAllCollision(character)
     if not character then return end
     for _, part in ipairs(character:GetDescendants()) do
@@ -96,40 +133,38 @@ local function removeHitbox(player)
     if not player.Character then return end
     local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
     if not targetPart or not targetPart:IsA("BasePart") then return end
+
     local userId = player.UserId
     if connections[userId] then
         for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
         connections[userId] = {}
     end
+
     targetPart.Size = Vector3.new(2, 2, 1)
     targetPart.CanCollide = true
     targetPart.Transparency = 1
 end
 
--- FIX #5: disconnect stale connections up front, before checking
--- health/existence — prevents a fast respawn inside the 5s validation
--- window from leaving dead connections pointed at a destroyed instance
 local function applyHitbox(player)
-    if player == LocalPlayer then return end
-    local userId = player.UserId
-    if connections[userId] then
-        for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
-        connections[userId] = {}
-    end
-
-    if not getgenv().Enabled then return end
+    if not getgenv().Enabled or player == LocalPlayer then return end
     if not player.Character then return end
 
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if humanoid and humanoid.Health <= 0 then return end
+
     local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
     if not targetPart or not targetPart:IsA("BasePart") then return end
 
     targetPart.Size = getgenv().HitboxSize
-    -- FIX #2: respect current visibility setting, not just default
     targetPart.Transparency = getgenv().HitboxVisible and 0.5 or 1
     targetPart.CanCollide = false
     disableAllCollision(player.Character)
+
+    local userId = player.UserId
+    if connections[userId] then
+        for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
+    end
+    connections[userId] = {}
 
     table.insert(connections[userId], targetPart:GetPropertyChangedSignal("Size"):Connect(function()
         if targetPart.Size ~= getgenv().HitboxSize then targetPart.Size = getgenv().HitboxSize end
@@ -168,11 +203,23 @@ local function updateVisibility()
     end
 end
 
+cBtn.MouseButton1Click:Connect(function()
+    getgenv().HitboxVisible = not getgenv().HitboxVisible
+    updateVisibility()
+    updateCBtn()
+end)
+
+-- =============================================
+-- CAMLOCK
+-- =============================================
+
 local function isKnockedOrDead(player)
     if not player or not player.Character then return true end
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid then return true end
-    return humanoid.Health <= 0
+    local ok, health = pcall(function() return humanoid.Health end)
+    if not ok then return true end
+    return health <= 0
 end
 
 local function hasLineOfSight(targetHRP)
@@ -214,15 +261,13 @@ local function getPredictedPosition(targetHRP, player)
     return targetHRP.Position + vel * ping + 0.5 * ca * ping * ping + AIM_OFFSET
 end
 
--- FIX #1: removed unused lastBestDot — was declared, never read
-local function getPlayerInCrosshair(exclude)
-    local best = nil
-    local bestDot = -math.huge
+local function getPlayerInCrosshair()
+    local best, bestDot = nil, -math.huge
     local look = Camera.CFrame.LookVector
     local camPos = Camera.CFrame.Position
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player ~= exclude and player.Character then
+        if player ~= LocalPlayer and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             if hrp and hrp:IsDescendantOf(workspace) and not isKnockedOrDead(player) then
                 if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
@@ -247,7 +292,7 @@ local function handleQ()
     if getgenv().CamlockTarget then
         releaseTarget()
     else
-        local target = getPlayerInCrosshair(nil)
+        local target = getPlayerInCrosshair()
         if target and target ~= LocalPlayer then
             getgenv().CamlockTarget = target
             updateQBtn(true)
@@ -261,8 +306,8 @@ Camera.CameraType = Enum.CameraType.Custom
 pcall(function() RunService:UnbindFromRenderStep("DemigodCamlock") end)
 
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
-    if not getgenv().CamlockTarget then return end
     local target = getgenv().CamlockTarget
+    if not target then return end
 
     if target == LocalPlayer then
         releaseTarget()
@@ -270,15 +315,19 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     end
 
     if not target.Character then releaseTarget(); return end
+
     local hum = target.Character:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then releaseTarget(); return end
+
     local hrp = target.Character:FindFirstChild("HumanoidRootPart")
     if not hrp or not hrp:IsDescendantOf(workspace) then releaseTarget(); return end
+
     if getgenv().WallCheckEnabled and not hasLineOfSight(hrp) then return end
 
     local camCF = Camera.CFrame
     local camPos = camCF.Position
     local currentLook = camCF.LookVector
+
     local predicted = getPredictedPosition(hrp, target)
     local toTarget = predicted - camPos
     if toTarget.Magnitude < 0.1 then return end
@@ -287,26 +336,34 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     local dot = currentLook:Dot(targetDir)
     local alpha = dot > 0.98 and 1 or 1 - (1 - SMOOTHNESS) ^ (dt * 60)
     local newLook = currentLook:Lerp(targetDir, alpha)
-    if newLook.Magnitude < 0.001 then return end
 
+    if newLook.Magnitude < 0.001 then return end
     Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
+
+-- =============================================
+-- CARRY DETECTION
+-- =============================================
 
 local function getCarriedCharacter()
     local character = LocalPlayer.Character
     if not character then return nil end
     local hrp = character:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
+
     for _, weld in ipairs(hrp:GetChildren()) do
-        if weld:IsA("WeldConstraint") or weld:IsA("Weld") or weld:IsA("Motor6D") then
-            local otherPart = weld:IsA("WeldConstraint") and weld.Part1 or weld.Part1
-            if otherPart and otherPart.Parent ~= character then return otherPart.Parent end
+        if weld:IsA("WeldConstraint") or weld:IsA("Weld") then
+            local otherPart = weld.Part1
+            if otherPart and otherPart.Parent and otherPart.Parent ~= character then
+                return otherPart.Parent
+            end
         end
     end
     for _, weld in ipairs(character:GetDescendants()) do
         if weld:IsA("WeldConstraint") or weld:IsA("Weld") then
-            local otherPart = weld:IsA("WeldConstraint") and weld.Part1 or weld.Part1
-            if otherPart and otherPart.Parent ~= character and otherPart.Parent:FindFirstChildOfClass("Humanoid") then
+            local otherPart = weld.Part1
+            if otherPart and otherPart.Parent and otherPart.Parent ~= character
+                and otherPart.Parent:FindFirstChildOfClass("Humanoid") then
                 return otherPart.Parent
             end
         end
@@ -320,6 +377,7 @@ task.spawn(function()
         local character = LocalPlayer.Character
         local detected = getCarriedCharacter()
         local carrying = detected ~= nil
+
         if carrying and not wasCarrying then
             disableAllCollision(character)
             disableAllCollision(detected)
@@ -337,6 +395,10 @@ task.spawn(function()
     end
 end)
 
+-- =============================================
+-- VALIDATION
+-- =============================================
+
 local function validateHitboxes()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
@@ -347,7 +409,9 @@ local function validateHitboxes()
                 local sizeMatch = tp.Size.X == getgenv().HitboxSize.X
                     and tp.Size.Y == getgenv().HitboxSize.Y
                     and tp.Size.Z == getgenv().HitboxSize.Z
-                if not sizeMatch or tp.CanCollide ~= false then applyHitbox(player) end
+                if not sizeMatch or tp.CanCollide ~= false then
+                    applyHitbox(player)
+                end
             end
         end
     end
@@ -360,35 +424,29 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     elseif input.KeyCode == Enum.KeyCode.C then
         getgenv().HitboxVisible = not getgenv().HitboxVisible
         updateVisibility()
+        updateCBtn()
     elseif input.KeyCode == Enum.KeyCode.Z then
         getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
     end
 end)
 
--- FIX #2: call updateVisibility after initial apply so a player
--- who joins while hitboxes are set to invisible loads correctly
 local function setupPlayer(player)
     if player == LocalPlayer then return end
     if player.Character then
-        task.spawn(function()
-            applyHitbox(player)
-            setupHealthWatch(player)
-            updateVisibility()
-        end)
-    end
-    player.CharacterAdded:Connect(function()
-        task.wait(0.3)
+        task.wait(0.5)
         applyHitbox(player)
         setupHealthWatch(player)
-        updateVisibility()
+    end
+    player.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        applyHitbox(player)
+        setupHealthWatch(player)
     end)
 end
 
 Players.PlayerAdded:Connect(setupPlayer)
 for _, player in ipairs(Players:GetPlayers()) do setupPlayer(player) end
 
--- FIX #6: clear carriedCharacter if the carried player disconnects
--- mid-carry, so wasCarrying doesn't stay stuck true forever
 Players.PlayerRemoving:Connect(function(player)
     local userId = player.UserId
     if connections[userId] then
@@ -400,10 +458,6 @@ Players.PlayerRemoving:Connect(function(player)
         healthConnections[userId] = nil
     end
     lastVelocityCache[userId] = nil
-    if carriedCharacter and player.Character == carriedCharacter then
-        carriedCharacter = nil
-        wasCarrying = false
-    end
 end)
 
 task.spawn(function()
@@ -414,4 +468,6 @@ task.spawn(function()
 end)
 
 updateQBtn(false)
+updateCBtn()
 notify("Demigod 🌟", "Loaded — Q: Lock | C: Visibility | Z: Wall Check", 5)
+print("Demigod script loaded")
