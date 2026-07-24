@@ -1,7 +1,8 @@
 -- =============================================
 -- MODE SELECTION — must run first
 -- =============================================
-getgenv().ScriptMode = getgenv().ScriptMode or nil -- "PC" or "Mobile"
+getgenv().CamlockTarget = nil -- hard reset on every execution, kills stale cross-session references
+getgenv().ScriptMode = getgenv().ScriptMode or nil
 
 if not getgenv().ScriptMode then
     local StarterGui = game:GetService("StarterGui")
@@ -69,8 +70,8 @@ getgenv().HitboxSize = Vector3.new(8, 8, 8)
 getgenv().TargetPart = "HumanoidRootPart"
 getgenv().Enabled = true
 getgenv().HitboxVisible = true
-getgenv().CamlockTarget = nil
-getgenv().WallCheckEnabled = false
+-- CamlockTarget already reset above
+getgenv().WallCheckEnabled = true -- default ON now, Z disables it
 getgenv().Whitelist = getgenv().Whitelist or {}
 getgenv().AutoLockPool = getgenv().AutoLockPool or {}
 getgenv().AutoLockEnabled = false
@@ -80,6 +81,7 @@ local AIM_OFFSET = Vector3.new(0, 1.6, 0)
 local PING_MIN = 0.059
 local PING_MAX = 0.080
 local KNOCK_THRESHOLD = 2
+local MACRO_ACCEL_CLAMP = 220 -- was 80, raised to track macro burst velocity without overshoot-correct shake
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -116,13 +118,48 @@ screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
 screenGui.Parent = LocalPlayer.PlayerGui
 
-local qFrame, qBtn, qDot, cFrame, cBtn, cDot
+-- =============================================
+-- DRAG HELPER (shared by emote/inventory buttons)
+-- =============================================
+local function makeDraggable(frame)
+    local dragging = false
+    local dragStart, startPos
+
+    frame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+local qFrame, qBtn, qDot, cFrame, cBtn, cDot, zFrame, zBtn, zDot
 local wlToggleBtn, alToggleBtn
 
 if IS_MOBILE then
     qFrame = Instance.new("Frame")
     qFrame.Size = UDim2.new(0, 50, 0, 50)
-    qFrame.Position = UDim2.new(0.5, -55, 1, -120)
+    qFrame.Position = UDim2.new(0.5, -80, 1, -120)
     qFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     qFrame.BackgroundTransparency = 0.3
     qFrame.Active = true
@@ -147,7 +184,7 @@ if IS_MOBILE then
 
     cFrame = Instance.new("Frame")
     cFrame.Size = UDim2.new(0, 50, 0, 50)
-    cFrame.Position = UDim2.new(0.5, 5, 1, -120)
+    cFrame.Position = UDim2.new(0.5, -25, 1, -120)
     cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     cFrame.BackgroundTransparency = 0.3
     cFrame.Active = true
@@ -170,30 +207,124 @@ if IS_MOBILE then
     cDot.Parent = cFrame
     Instance.new("UICorner", cDot).CornerRadius = UDim.new(1, 0)
 
+    -- Z button — wall check toggle
+    zFrame = Instance.new("Frame")
+    zFrame.Size = UDim2.new(0, 50, 0, 50)
+    zFrame.Position = UDim2.new(0.5, 30, 1, -120)
+    zFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    zFrame.BackgroundTransparency = 0.3
+    zFrame.Active = true
+    zFrame.Parent = screenGui
+    Instance.new("UICorner", zFrame).CornerRadius = UDim.new(1, 0)
+
+    zBtn = Instance.new("TextButton")
+    zBtn.Size = UDim2.new(1, 0, 1, 0)
+    zBtn.BackgroundTransparency = 1
+    zBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    zBtn.Text = "Z"
+    zBtn.Font = Enum.Font.GothamBold
+    zBtn.TextSize = 22
+    zBtn.Parent = zFrame
+
+    zDot = Instance.new("Frame")
+    zDot.Size = UDim2.new(0, 10, 0, 10)
+    zDot.Position = UDim2.new(1, -2, 0, -2)
+    zDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100) -- starts green, wall check defaults ON
+    zDot.Parent = zFrame
+    Instance.new("UICorner", zDot).CornerRadius = UDim.new(1, 0)
+
+    -- WL/AL moved off the bottom row entirely — top-right stack now
     wlToggleBtn = Instance.new("TextButton")
-    wlToggleBtn.Size = UDim2.new(0, 50, 0, 50)
-    wlToggleBtn.Position = UDim2.new(0.5, -55, 1, -180)
+    wlToggleBtn.Size = UDim2.new(0, 46, 0, 46)
+    wlToggleBtn.Position = UDim2.new(1, -56, 0, 90)
     wlToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     wlToggleBtn.BackgroundTransparency = 0.3
     wlToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     wlToggleBtn.Text = "WL"
     wlToggleBtn.Font = Enum.Font.GothamBold
-    wlToggleBtn.TextSize = 14
+    wlToggleBtn.TextSize = 13
     wlToggleBtn.Parent = screenGui
     Instance.new("UICorner", wlToggleBtn).CornerRadius = UDim.new(1, 0)
 
     alToggleBtn = Instance.new("TextButton")
-    alToggleBtn.Size = UDim2.new(0, 50, 0, 50)
-    alToggleBtn.Position = UDim2.new(0.5, 5, 1, -180)
+    alToggleBtn.Size = UDim2.new(0, 46, 0, 46)
+    alToggleBtn.Position = UDim2.new(1, -56, 0, 144)
     alToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     alToggleBtn.BackgroundTransparency = 0.3
     alToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     alToggleBtn.Text = "AL"
     alToggleBtn.Font = Enum.Font.GothamBold
-    alToggleBtn.TextSize = 14
+    alToggleBtn.TextSize = 13
     alToggleBtn.Parent = screenGui
     Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(1, 0)
 end
+
+-- Emote-tab shortcut — draggable, both modes
+local emoteBtn = Instance.new("TextButton")
+emoteBtn.Size = UDim2.new(0, 56, 0, 56)
+emoteBtn.Position = UDim2.new(0, 20, 0.5, -60)
+emoteBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
+emoteBtn.BackgroundTransparency = 0.15
+emoteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+emoteBtn.Text = "🎭"
+emoteBtn.Font = Enum.Font.GothamBold
+emoteBtn.TextSize = 24
+emoteBtn.Active = true
+emoteBtn.Parent = screenGui
+Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
+makeDraggable(emoteBtn)
+
+emoteBtn.MouseButton1Click:Connect(function()
+    local opened = pcall(function()
+        StarterGui:SetCore("ResetButtonCallback", true) -- ensures core UI is responsive
+        local CoreGui = game:GetService("CoreGui")
+        local success = pcall(function()
+            require(CoreGui.RobloxGui.Modules.EmotesMenu.EmotesMenuMaster).ToggleEmotesMenu()
+        end)
+        if not success then
+            -- Fallback: simulate the default emote menu hotkey
+            local VIM = game:GetService("VirtualInputManager")
+            VIM:SendKeyEvent(true, Enum.KeyCode.B, false, game)
+            task.wait(0.05)
+            VIM:SendKeyEvent(false, Enum.KeyCode.B, false, game)
+        end
+    end)
+    if not opened then
+        notify("Emote", "Couldn't open menu — this game may not expose it the standard way", 3)
+    end
+end)
+
+-- Inventory-tab shortcut — draggable, both modes
+local invBtn = Instance.new("TextButton")
+invBtn.Size = UDim2.new(0, 56, 0, 56)
+invBtn.Position = UDim2.new(0, 20, 0.5, 10)
+invBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
+invBtn.BackgroundTransparency = 0.15
+invBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+invBtn.Text = "🎒"
+invBtn.Font = Enum.Font.GothamBold
+invBtn.TextSize = 24
+invBtn.Active = true
+invBtn.Parent = screenGui
+Instance.new("UICorner", invBtn).CornerRadius = UDim.new(1, 0)
+makeDraggable(invBtn)
+
+invBtn.MouseButton1Click:Connect(function()
+    local opened = pcall(function()
+        local success = pcall(function()
+            StarterGui:SetCore("SetInventoryEnabled", true)
+        end)
+        if not success then
+            local VIM = game:GetService("VirtualInputManager")
+            VIM:SendKeyEvent(true, Enum.KeyCode.Backquote, false, game)
+            task.wait(0.05)
+            VIM:SendKeyEvent(false, Enum.KeyCode.Backquote, false, game)
+        end
+    end)
+    if not opened then
+        notify("Inventory", "Couldn't open menu — this game may not expose it the standard way", 3)
+    end
+end)
 
 local function updateQBtn(locked)
     if not IS_MOBILE then return end
@@ -214,6 +345,17 @@ local function updateCBtn()
     else
         cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
         cDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+    end
+end
+
+local function updateZBtn()
+    if not IS_MOBILE then return end
+    if getgenv().WallCheckEnabled then
+        zFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
+        zDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
+    else
+        zFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        zDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
     end
 end
 
@@ -252,9 +394,6 @@ wlLayout.Parent = wlScroll
 
 -- =============================================
 -- AUTO-LOCK GUI — keybind K
--- Rows toggle POOL membership (stackable), not a
--- single pick. Selected players all join one active
--- rotation governed by health/distance priority.
 -- =============================================
 local autoLockGui = Instance.new("Frame")
 autoLockGui.Size = UDim2.new(0, 220, 0, 300)
@@ -285,9 +424,20 @@ alEnableBtn.TextSize = 12
 alEnableBtn.Parent = autoLockGui
 Instance.new("UICorner", alEnableBtn).CornerRadius = UDim.new(0, 6)
 
+-- Status label — makes "off" vs "on but pool empty" visibly different
+local alStatusLabel = Instance.new("TextLabel")
+alStatusLabel.Size = UDim2.new(1, -10, 0, 20)
+alStatusLabel.Position = UDim2.new(0, 5, 0, 62)
+alStatusLabel.BackgroundTransparency = 1
+alStatusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+alStatusLabel.Text = "Pool empty"
+alStatusLabel.Font = Enum.Font.Gotham
+alStatusLabel.TextSize = 11
+alStatusLabel.Parent = autoLockGui
+
 local alScroll = Instance.new("ScrollingFrame")
-alScroll.Size = UDim2.new(1, -10, 1, -70)
-alScroll.Position = UDim2.new(0, 5, 0, 64)
+alScroll.Size = UDim2.new(1, -10, 1, -92)
+alScroll.Position = UDim2.new(0, 5, 0, 86)
 alScroll.BackgroundTransparency = 1
 alScroll.ScrollBarThickness = 4
 alScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -321,6 +471,10 @@ local function rebuildWhitelistGui()
 
             row.MouseButton1Click:Connect(function()
                 getgenv().Whitelist[player.UserId] = not getgenv().Whitelist[player.UserId] or nil
+                if getgenv().Whitelist[player.UserId] and getgenv().CamlockTarget == player then
+                    getgenv().CamlockTarget = nil
+                    updateQBtn(false)
+                end
                 rebuildWhitelistGui()
             end)
         end
@@ -359,6 +513,9 @@ alEnableBtn.MouseButton1Click:Connect(function()
     alEnableBtn.BackgroundColor3 = getgenv().AutoLockEnabled
         and Color3.fromRGB(60, 120, 60)
         or Color3.fromRGB(90, 80, 60)
+    if not getgenv().AutoLockEnabled then
+        alStatusLabel.Text = "Off"
+    end
 end)
 
 if IS_MOBILE then
@@ -367,6 +524,10 @@ if IS_MOBILE then
     end)
     alToggleBtn.MouseButton1Click:Connect(function()
         autoLockGui.Visible = not autoLockGui.Visible
+    end)
+    zBtn.MouseButton1Click:Connect(function()
+        getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
+        updateZBtn()
     end)
 end
 
@@ -511,14 +672,16 @@ local function getAcceleration(player, velocity)
     return accel
 end
 
+-- Wider accel clamp handles macro burst velocity without the
+-- correction shake that came from clamping too tight at 80
 local function getPredictedPosition(targetHRP, player)
     local ping = math.clamp(LocalPlayer:GetNetworkPing(), PING_MIN, PING_MAX)
     local vel = targetHRP.AssemblyLinearVelocity
     local accel = getAcceleration(player, vel)
     local ca = Vector3.new(
-        math.clamp(accel.X, -80, 80),
-        math.clamp(accel.Y, -80, 80),
-        math.clamp(accel.Z, -80, 80)
+        math.clamp(accel.X, -MACRO_ACCEL_CLAMP, MACRO_ACCEL_CLAMP),
+        math.clamp(accel.Y, -MACRO_ACCEL_CLAMP, MACRO_ACCEL_CLAMP),
+        math.clamp(accel.Z, -MACRO_ACCEL_CLAMP, MACRO_ACCEL_CLAMP)
     )
     return targetHRP.Position + vel * ping + 0.5 * ca * ping * ping + AIM_OFFSET
 end
@@ -545,10 +708,6 @@ local function getPlayerInCrosshair()
     return best
 end
 
--- Auto-Lock: evaluates the whole stacked pool every frame.
--- Priority = lowest health wins; distance only breaks a tie.
--- Dead/knocked/left players are removed from the pool here,
--- so the pool self-cleans as fights resolve.
 local function getAutoLockTarget()
     local best, bestHealth, bestDist = nil, math.huge, math.huge
     local localChar = LocalPlayer.Character
@@ -556,29 +715,34 @@ local function getAutoLockTarget()
     if not localHRP then return nil end
 
     for userId in pairs(getgenv().AutoLockPool) do
-        local player = Players:GetPlayerByUserId(userId)
-        if player and player ~= LocalPlayer and not getgenv().Whitelist[userId] and player.Character then
-            local hum = player.Character:FindFirstChildOfClass("Humanoid")
-            local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+        -- explicit LocalPlayer guard on the pool itself, not just downstream
+        if userId ~= LocalPlayer.UserId then
+            local player = Players:GetPlayerByUserId(userId)
+            if player and player ~= LocalPlayer and not getgenv().Whitelist[userId] and player.Character then
+                local hum = player.Character:FindFirstChildOfClass("Humanoid")
+                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
 
-            if hum and hrp and hrp:IsDescendantOf(workspace) then
-                local ok, health = pcall(function() return hum.Health end)
+                if hum and hrp and hrp:IsDescendantOf(workspace) then
+                    local ok, health = pcall(function() return hum.Health end)
 
-                if ok and health > KNOCK_THRESHOLD then
-                    if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
-                        local dist = (hrp.Position - localHRP.Position).Magnitude
-                        if health < bestHealth or (health == bestHealth and dist < bestDist) then
-                            bestHealth = health
-                            bestDist = dist
-                            best = player
+                    if ok and health > KNOCK_THRESHOLD then
+                        if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
+                            local dist = (hrp.Position - localHRP.Position).Magnitude
+                            if health < bestHealth or (health == bestHealth and dist < bestDist) then
+                                bestHealth = health
+                                bestDist = dist
+                                best = player
+                            end
                         end
+                    else
+                        getgenv().AutoLockPool[userId] = nil -- knocked/dead, drop from pool, toggle stays untouched
                     end
                 else
-                    getgenv().AutoLockPool[userId] = nil -- dead/knocked, drop from pool
+                    getgenv().AutoLockPool[userId] = nil -- character gone, drop from pool, toggle stays untouched
                 end
-            else
-                getgenv().AutoLockPool[userId] = nil -- character gone, drop from pool
             end
+        else
+            getgenv().AutoLockPool[userId] = nil -- safety: never allow self in the pool
         end
     end
     return best
@@ -610,21 +774,30 @@ Camera.CameraType = Enum.CameraType.Custom
 pcall(function() RunService:UnbindFromRenderStep("DemigodCamlock") end)
 
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
-    -- Auto-Lock drives targeting continuously while the pool is non-empty.
-    -- It takes priority over manual Q selection while active.
-    if getgenv().AutoLockEnabled and next(getgenv().AutoLockPool) ~= nil then
-        local autoTarget = getAutoLockTarget()
-        if autoTarget then
-            getgenv().CamlockTarget = autoTarget
-            updateQBtn(true)
-        elseif getgenv().CamlockTarget then
-            releaseTarget()
+    -- Auto-Lock releases on death WITHOUT touching AutoLockEnabled.
+    -- "Off" (toggle false) and "on with empty pool" are now visibly different states.
+    if getgenv().AutoLockEnabled then
+        if next(getgenv().AutoLockPool) ~= nil then
+            local autoTarget = getAutoLockTarget()
+            if autoTarget then
+                getgenv().CamlockTarget = autoTarget
+                updateQBtn(true)
+                if IS_MOBILE then alStatusLabel.Text = "Tracking: " .. autoTarget.Name end
+            else
+                -- current auto target died/knocked — release only, toggle untouched
+                if getgenv().CamlockTarget then releaseTarget() end
+                if IS_MOBILE then alStatusLabel.Text = "Pool empty" end
+            end
+        else
+            if getgenv().CamlockTarget then releaseTarget() end
+            if IS_MOBILE then alStatusLabel.Text = "Pool empty" end
         end
     end
 
     local target = getgenv().CamlockTarget
     if not target then return end
 
+    -- Hard LocalPlayer guard — checked every single frame, first thing
     if target == LocalPlayer then releaseTarget(); return end
     if getgenv().Whitelist[target.UserId] then releaseTarget(); return end
 
@@ -751,6 +924,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         updateCBtn()
     elseif input.KeyCode == Enum.KeyCode.Z then
         getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
+        updateZBtn()
     elseif input.KeyCode == Enum.KeyCode.J then
         whitelistGui.Visible = not whitelistGui.Visible
     elseif input.KeyCode == Enum.KeyCode.K then
@@ -812,5 +986,6 @@ rebuildWhitelistGui()
 rebuildAutoLockGui()
 updateQBtn(false)
 updateCBtn()
-notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | C: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock", 6)
+updateZBtn()
+notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | C: Visibility | Z: Wall (default ON) | J: Whitelist | K: Auto-Lock", 6)
 print("Demigod script loaded — Mode: " .. getgenv().ScriptMode)
