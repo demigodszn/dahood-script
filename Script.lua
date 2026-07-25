@@ -81,6 +81,7 @@ local PING_MIN = 0.059
 local PING_MAX = 0.080
 local KNOCK_THRESHOLD = 2
 local MACRO_ACCEL_CLAMP = 220
+local MAX_HEALTH = 100 -- Da Hood default max health, used for "both full health" check
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -115,6 +116,7 @@ local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "DemigodGui"
 screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
+screenGui.DisplayOrder = 1000 -- FIX 4: ensures our GUI layer sits above the game's own touch/camera layer
 screenGui.Parent = LocalPlayer.PlayerGui
 
 local function makeDraggable(frame)
@@ -159,6 +161,7 @@ if IS_MOBILE then
     qFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     qFrame.BackgroundTransparency = 0.3
     qFrame.Active = true
+    qFrame.ZIndex = 50 -- FIX 4: raised above default so touch isn't stolen by game's camera-drag layer
     qFrame.Parent = screenGui
     Instance.new("UICorner", qFrame).CornerRadius = UDim.new(1, 0)
 
@@ -169,12 +172,15 @@ if IS_MOBILE then
     qBtn.Text = "Q"
     qBtn.Font = Enum.Font.GothamBold
     qBtn.TextSize = 22
+    qBtn.Active = true -- FIX 4: explicit, was implicit before
+    qBtn.ZIndex = 51
     qBtn.Parent = qFrame
 
     qDot = Instance.new("Frame")
     qDot.Size = UDim2.new(0, 10, 0, 10)
     qDot.Position = UDim2.new(1, -2, 0, -2)
     qDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+    qDot.ZIndex = 52
     qDot.Parent = qFrame
     Instance.new("UICorner", qDot).CornerRadius = UDim.new(1, 0)
 
@@ -184,6 +190,7 @@ if IS_MOBILE then
     cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     cFrame.BackgroundTransparency = 0.3
     cFrame.Active = true
+    cFrame.ZIndex = 50
     cFrame.Parent = screenGui
     Instance.new("UICorner", cFrame).CornerRadius = UDim.new(1, 0)
 
@@ -194,12 +201,15 @@ if IS_MOBILE then
     cBtn.Text = "C"
     cBtn.Font = Enum.Font.GothamBold
     cBtn.TextSize = 22
+    cBtn.Active = true
+    cBtn.ZIndex = 51
     cBtn.Parent = cFrame
 
     cDot = Instance.new("Frame")
     cDot.Size = UDim2.new(0, 10, 0, 10)
     cDot.Position = UDim2.new(1, -2, 0, -2)
     cDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
+    cDot.ZIndex = 52
     cDot.Parent = cFrame
     Instance.new("UICorner", cDot).CornerRadius = UDim.new(1, 0)
 
@@ -209,6 +219,7 @@ if IS_MOBILE then
     zFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     zFrame.BackgroundTransparency = 0.3
     zFrame.Active = true
+    zFrame.ZIndex = 50
     zFrame.Parent = screenGui
     Instance.new("UICorner", zFrame).CornerRadius = UDim.new(1, 0)
 
@@ -219,12 +230,15 @@ if IS_MOBILE then
     zBtn.Text = "Z"
     zBtn.Font = Enum.Font.GothamBold
     zBtn.TextSize = 22
+    zBtn.Active = true
+    zBtn.ZIndex = 51
     zBtn.Parent = zFrame
 
     zDot = Instance.new("Frame")
     zDot.Size = UDim2.new(0, 10, 0, 10)
     zDot.Position = UDim2.new(1, -2, 0, -2)
     zDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
+    zDot.ZIndex = 52
     zDot.Parent = zFrame
     Instance.new("UICorner", zDot).CornerRadius = UDim.new(1, 0)
 
@@ -237,6 +251,8 @@ if IS_MOBILE then
     wlToggleBtn.Text = "WL"
     wlToggleBtn.Font = Enum.Font.GothamBold
     wlToggleBtn.TextSize = 13
+    wlToggleBtn.Active = true
+    wlToggleBtn.ZIndex = 50
     wlToggleBtn.Parent = screenGui
     Instance.new("UICorner", wlToggleBtn).CornerRadius = UDim.new(1, 0)
 
@@ -249,11 +265,13 @@ if IS_MOBILE then
     alToggleBtn.Text = "AL"
     alToggleBtn.Font = Enum.Font.GothamBold
     alToggleBtn.TextSize = 13
+    alToggleBtn.Active = true
+    alToggleBtn.ZIndex = 50
     alToggleBtn.Parent = screenGui
     Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(1, 0)
 end
 
--- Emote-tab shortcut only — inventory button removed per request
+-- Emote-tab shortcut
 local emoteBtn = Instance.new("TextButton")
 emoteBtn.Size = UDim2.new(0, 56, 0, 56)
 emoteBtn.Position = UDim2.new(0, 20, 0.5, -28)
@@ -264,6 +282,7 @@ emoteBtn.Text = "🎭"
 emoteBtn.Font = Enum.Font.GothamBold
 emoteBtn.TextSize = 24
 emoteBtn.Active = true
+emoteBtn.ZIndex = 50
 emoteBtn.Parent = screenGui
 Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
 makeDraggable(emoteBtn)
@@ -271,6 +290,7 @@ makeDraggable(emoteBtn)
 emoteBtn.MouseButton1Click:Connect(function()
     local succeeded = false
 
+    -- Attempt 1: standard Roblox emote menu module
     local ok1 = pcall(function()
         local CoreGui = game:GetService("CoreGui")
         local module = CoreGui:WaitForChild("RobloxGui", 1)
@@ -281,18 +301,19 @@ emoteBtn.MouseButton1Click:Connect(function()
     end)
     if ok1 then succeeded = true end
 
+    -- FIX 3: Da Hood's actual emote-select bind is the period key ("."), not B or K
     if not succeeded then
         local ok2 = pcall(function()
             local VIM = game:GetService("VirtualInputManager")
-            VIM:SendKeyEvent(true, Enum.KeyCode.K, false, game)
+            VIM:SendKeyEvent(true, Enum.KeyCode.Period, false, game)
             task.wait(0.05)
-            VIM:SendKeyEvent(false, Enum.KeyCode.K, false, game)
+            VIM:SendKeyEvent(false, Enum.KeyCode.Period, false, game)
         end)
         if ok2 then succeeded = true end
     end
 
     if not succeeded then
-        notify("Emote", "Da Hood doesn't expose a standard emote menu hook — try the game's own emote hotkey manually", 4)
+        notify("Emote", "Couldn't trigger the emote wheel — try pressing '.' manually", 4)
     end
 end)
 
@@ -338,6 +359,7 @@ whitelistGui.Position = UDim2.new(0, 20, 0.5, -150)
 whitelistGui.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
 whitelistGui.Visible = false
 whitelistGui.Active = true
+whitelistGui.ZIndex = 60
 whitelistGui.Parent = screenGui
 Instance.new("UICorner", whitelistGui).CornerRadius = UDim.new(0, 8)
 
@@ -348,6 +370,7 @@ wlTitle.Text = "Whitelist"
 wlTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 wlTitle.Font = Enum.Font.GothamBold
 wlTitle.TextSize = 16
+wlTitle.ZIndex = 61
 wlTitle.Parent = whitelistGui
 
 local wlScroll = Instance.new("ScrollingFrame")
@@ -356,6 +379,7 @@ wlScroll.Position = UDim2.new(0, 5, 0, 32)
 wlScroll.BackgroundTransparency = 1
 wlScroll.ScrollBarThickness = 4
 wlScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+wlScroll.ZIndex = 61
 wlScroll.Parent = whitelistGui
 
 local wlLayout = Instance.new("UIListLayout")
@@ -371,6 +395,7 @@ autoLockGui.Position = UDim2.new(1, -240, 0.5, -150)
 autoLockGui.BackgroundColor3 = Color3.fromRGB(30, 40, 30)
 autoLockGui.Visible = false
 autoLockGui.Active = true
+autoLockGui.ZIndex = 60
 autoLockGui.Parent = screenGui
 Instance.new("UICorner", autoLockGui).CornerRadius = UDim.new(0, 8)
 
@@ -381,6 +406,7 @@ alTitle.Text = "Auto-Lock"
 alTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 alTitle.Font = Enum.Font.GothamBold
 alTitle.TextSize = 16
+alTitle.ZIndex = 61
 alTitle.Parent = autoLockGui
 
 local alEnableBtn = Instance.new("TextButton")
@@ -391,6 +417,8 @@ alEnableBtn.Text = "Auto-Lock: OFF"
 alEnableBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 alEnableBtn.Font = Enum.Font.GothamBold
 alEnableBtn.TextSize = 12
+alEnableBtn.Active = true
+alEnableBtn.ZIndex = 61
 alEnableBtn.Parent = autoLockGui
 Instance.new("UICorner", alEnableBtn).CornerRadius = UDim.new(0, 6)
 
@@ -402,6 +430,7 @@ alStatusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
 alStatusLabel.Text = "Pool empty"
 alStatusLabel.Font = Enum.Font.Gotham
 alStatusLabel.TextSize = 11
+alStatusLabel.ZIndex = 61
 alStatusLabel.Parent = autoLockGui
 
 local alScroll = Instance.new("ScrollingFrame")
@@ -410,6 +439,7 @@ alScroll.Position = UDim2.new(0, 5, 0, 86)
 alScroll.BackgroundTransparency = 1
 alScroll.ScrollBarThickness = 4
 alScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+alScroll.ZIndex = 61
 alScroll.Parent = autoLockGui
 
 local alLayout = Instance.new("UIListLayout")
@@ -421,6 +451,11 @@ local function clearChildren(parent)
         if child:IsA("TextButton") then child:Destroy() end
     end
 end
+
+-- FIX 2 support: pool rows now also show pooled players who are
+-- currently offline (rejoin-persistent) using their cached name
+local pooledNameCache = getgenv().PooledNameCache or {}
+getgenv().PooledNameCache = pooledNameCache
 
 local function rebuildWhitelistGui()
     clearChildren(wlScroll)
@@ -435,6 +470,7 @@ local function rebuildWhitelistGui()
             row.TextColor3 = Color3.fromRGB(255, 255, 255)
             row.Font = Enum.Font.Gotham
             row.TextSize = 12
+            row.ZIndex = 61
             row.Parent = wlScroll
             Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
 
@@ -453,8 +489,14 @@ end
 
 local function rebuildAutoLockGui()
     clearChildren(alScroll)
+
+    local onlineIds = {}
+
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
+            onlineIds[player.UserId] = true
+            pooledNameCache[player.UserId] = player.Name
+
             local row = Instance.new("TextButton")
             row.Size = UDim2.new(1, 0, 0, 30)
             row.BackgroundColor3 = getgenv().AutoLockPool[player.UserId]
@@ -464,6 +506,7 @@ local function rebuildAutoLockGui()
             row.TextColor3 = Color3.fromRGB(255, 255, 255)
             row.Font = Enum.Font.Gotham
             row.TextSize = 12
+            row.ZIndex = 61
             row.Parent = alScroll
             Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
 
@@ -473,6 +516,29 @@ local function rebuildAutoLockGui()
             end)
         end
     end
+
+    -- FIX 2: show pooled-but-currently-offline players too, so it's visible
+    -- in the GUI that they're still tracked and will resume on rejoin
+    for userId in pairs(getgenv().AutoLockPool) do
+        if not onlineIds[userId] then
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, 0, 0, 30)
+            row.BackgroundColor3 = Color3.fromRGB(60, 90, 60)
+            row.Text = (pooledNameCache[userId] or ("ID " .. userId)) .. " ✓ (pooled, offline)"
+            row.TextColor3 = Color3.fromRGB(200, 255, 200)
+            row.Font = Enum.Font.Gotham
+            row.TextSize = 11
+            row.ZIndex = 61
+            row.Parent = alScroll
+            Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+
+            row.MouseButton1Click:Connect(function()
+                getgenv().AutoLockPool[userId] = nil
+                rebuildAutoLockGui()
+            end)
+        end
+    end
+
     alScroll.CanvasSize = UDim2.new(0, 0, 0, alLayout.AbsoluteContentSize.Y + 10)
 end
 
@@ -675,9 +741,11 @@ local function getPlayerInCrosshair()
     return best
 end
 
--- Pool membership only clears when a player actually leaves the server.
--- Knocked players are skipped this pass (not removed) so respawn brings
--- them back into rotation automatically.
+-- FIX 1: when the current best and a challenger are BOTH at full health,
+-- distance becomes the deciding factor instead of only tie-breaking on
+-- exact-equal health values (which almost never happens outside full HP)
+-- FIX 2: pool membership is NEVER cleared on PlayerRemoving anymore —
+-- only manual toggle in the AL GUI or explicit leave-cleanup removes it
 local function getAutoLockTarget()
     local best, bestHealth, bestDist = nil, math.huge, math.huge
     local localChar = LocalPlayer.Character
@@ -687,9 +755,9 @@ local function getAutoLockTarget()
     for userId in pairs(getgenv().AutoLockPool) do
         if userId ~= LocalPlayer.UserId then
             local player = Players:GetPlayerByUserId(userId)
-            if not player then
-                getgenv().AutoLockPool[userId] = nil -- left the server, actually remove
-            elseif player ~= LocalPlayer and not getgenv().Whitelist[userId] and player.Character then
+            -- no longer purges pool on missing player — offline pooled players
+            -- just get skipped this pass, exactly like a knocked player would be
+            if player and player ~= LocalPlayer and not getgenv().Whitelist[userId] and player.Character then
                 local hum = player.Character:FindFirstChildOfClass("Humanoid")
                 local hrp = player.Character:FindFirstChild("HumanoidRootPart")
 
@@ -699,16 +767,22 @@ local function getAutoLockTarget()
                     if ok and health > KNOCK_THRESHOLD then
                         if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
                             local dist = (hrp.Position - localHRP.Position).Magnitude
-                            if health < bestHealth or (health == bestHealth and dist < bestDist) then
-                                bestHealth = health
-                                bestDist = dist
-                                best = player
+
+                            local bothFull = (health >= MAX_HEALTH) and (bestHealth >= MAX_HEALTH)
+
+                            if best == nil then
+                                bestHealth, bestDist, best = health, dist, player
+                            elseif bothFull then
+                                -- FIX 1: both full health — nearest wins outright
+                                if dist < bestDist then
+                                    bestHealth, bestDist, best = health, dist, player
+                                end
+                            elseif health < bestHealth or (health == bestHealth and dist < bestDist) then
+                                bestHealth, bestDist, best = health, dist, player
                             end
                         end
                     end
-                    -- knocked/dead: skipped, stays in pool for respawn
                 end
-                -- mid-respawn, no character yet: skipped, stays in pool
             end
         else
             getgenv().AutoLockPool[userId] = nil
@@ -752,7 +826,7 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
                 if IS_MOBILE then alStatusLabel.Text = "Tracking: " .. autoTarget.Name end
             else
                 if getgenv().CamlockTarget then releaseTarget() end
-                if IS_MOBILE then alStatusLabel.Text = "Pool: waiting on respawn" end
+                if IS_MOBILE then alStatusLabel.Text = "Pool: waiting (knocked/offline)" end
             end
         else
             if getgenv().CamlockTarget then releaseTarget() end
@@ -916,6 +990,7 @@ end
 
 Players.PlayerAdded:Connect(function(player)
     setupPlayer(player)
+    -- FIX 2: no pool re-sync needed on rejoin, membership was never cleared
     rebuildWhitelistGui()
     rebuildAutoLockGui()
 end)
@@ -934,7 +1009,9 @@ Players.PlayerRemoving:Connect(function(player)
     end
     lastVelocityCache[userId] = nil
     getgenv().Whitelist[userId] = nil
-    getgenv().AutoLockPool[userId] = nil
+    -- FIX 2: AutoLockPool[userId] is intentionally NOT cleared here anymore.
+    -- Leaving no longer purges pool membership — only manual removal via
+    -- the AL GUI does. This is what makes rejoin-persistence work.
     if getgenv().CamlockTarget == player then releaseTarget() end
     rebuildWhitelistGui()
     rebuildAutoLockGui()
