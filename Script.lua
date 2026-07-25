@@ -74,14 +74,19 @@ getgenv().WallCheckEnabled = true
 getgenv().Whitelist = getgenv().Whitelist or {}
 getgenv().AutoLockPool = getgenv().AutoLockPool or {}
 getgenv().AutoLockEnabled = false
+getgenv().SafeMode = false
 
 local SMOOTHNESS = 0.095
 local AIM_OFFSET = Vector3.new(0, 1.6, 0)
 local PING_MIN = 0.059
 local PING_MAX = 0.080
 local KNOCK_THRESHOLD = 2
+local RELOCK_THRESHOLD = 15
+local LOCAL_HEALTH_GATE = 15
 local MACRO_ACCEL_CLAMP = 220
-local MAX_HEALTH = 100 -- Da Hood default max health, used for "both full health" check
+local MAX_HEALTH = 100
+local TRIPLE_PRESS_WINDOW = 1.0
+local DEBUG_MODE = true -- prints diagnostic info for Q taps, set false once confirmed working
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -95,6 +100,7 @@ local healthConnections = {}
 local lastVelocityCache = {}
 local carriedCharacter = nil
 local wasCarrying = false
+local pendingRelock = {}
 
 local function notify(title, text, duration)
     pcall(function()
@@ -104,6 +110,31 @@ end
 
 local function isTyping()
     return UserInputService:GetFocusedTextBox() ~= nil
+end
+
+local pressTracker = {}
+
+local function triplePress(actionId, callback)
+    if not getgenv().SafeMode then
+        callback()
+        return
+    end
+
+    local now = tick()
+    local entry = pressTracker[actionId]
+
+    if not entry or (now - entry.lastTime) > TRIPLE_PRESS_WINDOW then
+        pressTracker[actionId] = {count = 1, lastTime = now}
+        if DEBUG_MODE then print("[SafeMode] " .. actionId .. " press 1/3") end
+    else
+        entry.count = entry.count + 1
+        entry.lastTime = now
+        if DEBUG_MODE then print("[SafeMode] " .. actionId .. " press " .. entry.count .. "/3") end
+        if entry.count >= 3 then
+            pressTracker[actionId] = nil
+            callback()
+        end
+    end
 end
 
 -- =============================================
@@ -116,7 +147,7 @@ local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "DemigodGui"
 screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
-screenGui.DisplayOrder = 1000 -- FIX 4: ensures our GUI layer sits above the game's own touch/camera layer
+screenGui.DisplayOrder = 1000
 screenGui.Parent = LocalPlayer.PlayerGui
 
 local function makeDraggable(frame)
@@ -151,6 +182,23 @@ local function makeDraggable(frame)
     end)
 end
 
+-- =============================================
+-- INVISIBILITY HELPER
+-- Fully transparent but stays clickable — Roblox click
+-- targets are hit-tested regardless of transparency.
+-- =============================================
+local function makeInvisible(frame, ...)
+    frame.BackgroundTransparency = 1
+    for _, child in ipairs({...}) do
+        if child:IsA("TextButton") or child:IsA("TextLabel") then
+            child.TextTransparency = 1
+            child.BackgroundTransparency = 1
+        elseif child:IsA("Frame") then
+            child.BackgroundTransparency = 1
+        end
+    end
+end
+
 local qFrame, qBtn, qDot, cFrame, cBtn, cDot, zFrame, zBtn, zDot
 local wlToggleBtn, alToggleBtn
 
@@ -161,7 +209,7 @@ if IS_MOBILE then
     qFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     qFrame.BackgroundTransparency = 0.3
     qFrame.Active = true
-    qFrame.ZIndex = 50 -- FIX 4: raised above default so touch isn't stolen by game's camera-drag layer
+    qFrame.ZIndex = 20 -- FIX: dedicated stacking band for Q, separate from Safe Mode's band
     qFrame.Parent = screenGui
     Instance.new("UICorner", qFrame).CornerRadius = UDim.new(1, 0)
 
@@ -172,15 +220,15 @@ if IS_MOBILE then
     qBtn.Text = "Q"
     qBtn.Font = Enum.Font.GothamBold
     qBtn.TextSize = 22
-    qBtn.Active = true -- FIX 4: explicit, was implicit before
-    qBtn.ZIndex = 51
+    qBtn.Active = true
+    qBtn.ZIndex = 21
     qBtn.Parent = qFrame
 
     qDot = Instance.new("Frame")
     qDot.Size = UDim2.new(0, 10, 0, 10)
     qDot.Position = UDim2.new(1, -2, 0, -2)
     qDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
-    qDot.ZIndex = 52
+    qDot.ZIndex = 22
     qDot.Parent = qFrame
     Instance.new("UICorner", qDot).CornerRadius = UDim.new(1, 0)
 
@@ -190,7 +238,7 @@ if IS_MOBILE then
     cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     cFrame.BackgroundTransparency = 0.3
     cFrame.Active = true
-    cFrame.ZIndex = 50
+    cFrame.ZIndex = 20
     cFrame.Parent = screenGui
     Instance.new("UICorner", cFrame).CornerRadius = UDim.new(1, 0)
 
@@ -202,14 +250,14 @@ if IS_MOBILE then
     cBtn.Font = Enum.Font.GothamBold
     cBtn.TextSize = 22
     cBtn.Active = true
-    cBtn.ZIndex = 51
+    cBtn.ZIndex = 21
     cBtn.Parent = cFrame
 
     cDot = Instance.new("Frame")
     cDot.Size = UDim2.new(0, 10, 0, 10)
     cDot.Position = UDim2.new(1, -2, 0, -2)
     cDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
-    cDot.ZIndex = 52
+    cDot.ZIndex = 22
     cDot.Parent = cFrame
     Instance.new("UICorner", cDot).CornerRadius = UDim.new(1, 0)
 
@@ -219,7 +267,7 @@ if IS_MOBILE then
     zFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     zFrame.BackgroundTransparency = 0.3
     zFrame.Active = true
-    zFrame.ZIndex = 50
+    zFrame.ZIndex = 20
     zFrame.Parent = screenGui
     Instance.new("UICorner", zFrame).CornerRadius = UDim.new(1, 0)
 
@@ -231,14 +279,14 @@ if IS_MOBILE then
     zBtn.Font = Enum.Font.GothamBold
     zBtn.TextSize = 22
     zBtn.Active = true
-    zBtn.ZIndex = 51
+    zBtn.ZIndex = 21
     zBtn.Parent = zFrame
 
     zDot = Instance.new("Frame")
     zDot.Size = UDim2.new(0, 10, 0, 10)
     zDot.Position = UDim2.new(1, -2, 0, -2)
     zDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
-    zDot.ZIndex = 52
+    zDot.ZIndex = 22
     zDot.Parent = zFrame
     Instance.new("UICorner", zDot).CornerRadius = UDim.new(1, 0)
 
@@ -252,7 +300,7 @@ if IS_MOBILE then
     wlToggleBtn.Font = Enum.Font.GothamBold
     wlToggleBtn.TextSize = 13
     wlToggleBtn.Active = true
-    wlToggleBtn.ZIndex = 50
+    wlToggleBtn.ZIndex = 20
     wlToggleBtn.Parent = screenGui
     Instance.new("UICorner", wlToggleBtn).CornerRadius = UDim.new(1, 0)
 
@@ -266,12 +314,13 @@ if IS_MOBILE then
     alToggleBtn.Font = Enum.Font.GothamBold
     alToggleBtn.TextSize = 13
     alToggleBtn.Active = true
-    alToggleBtn.ZIndex = 50
+    alToggleBtn.ZIndex = 20
     alToggleBtn.Parent = screenGui
     Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(1, 0)
 end
 
--- Emote-tab shortcut
+-- Emote button — fires ONLY the Period key event. No fallback chain,
+-- no CoreGui module require that might silently no-op in Da Hood.
 local emoteBtn = Instance.new("TextButton")
 emoteBtn.Size = UDim2.new(0, 56, 0, 56)
 emoteBtn.Position = UDim2.new(0, 20, 0.5, -28)
@@ -282,39 +331,25 @@ emoteBtn.Text = "🎭"
 emoteBtn.Font = Enum.Font.GothamBold
 emoteBtn.TextSize = 24
 emoteBtn.Active = true
-emoteBtn.ZIndex = 50
+emoteBtn.ZIndex = 20
 emoteBtn.Parent = screenGui
 Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
 makeDraggable(emoteBtn)
 
-emoteBtn.MouseButton1Click:Connect(function()
-    local succeeded = false
-
-    -- Attempt 1: standard Roblox emote menu module
-    local ok1 = pcall(function()
-        local CoreGui = game:GetService("CoreGui")
-        local module = CoreGui:WaitForChild("RobloxGui", 1)
-            :WaitForChild("Modules", 1)
-            :WaitForChild("EmotesMenu", 1)
-            :WaitForChild("EmotesMenuMaster", 1)
-        require(module).ToggleEmotesMenu()
+local function fireEmoteMenu()
+    local VIM = game:GetService("VirtualInputManager")
+    local ok = pcall(function()
+        VIM:SendKeyEvent(true, Enum.KeyCode.Period, false, game)
+        task.wait(0.05)
+        VIM:SendKeyEvent(false, Enum.KeyCode.Period, false, game)
     end)
-    if ok1 then succeeded = true end
-
-    -- FIX 3: Da Hood's actual emote-select bind is the period key ("."), not B or K
-    if not succeeded then
-        local ok2 = pcall(function()
-            local VIM = game:GetService("VirtualInputManager")
-            VIM:SendKeyEvent(true, Enum.KeyCode.Period, false, game)
-            task.wait(0.05)
-            VIM:SendKeyEvent(false, Enum.KeyCode.Period, false, game)
-        end)
-        if ok2 then succeeded = true end
+    if not ok then
+        notify("Emote", "Key event failed to send — try pressing '.' manually", 3)
     end
+end
 
-    if not succeeded then
-        notify("Emote", "Couldn't trigger the emote wheel — try pressing '.' manually", 4)
-    end
+emoteBtn.MouseButton1Click:Connect(function()
+    triplePress("emote", fireEmoteMenu)
 end)
 
 local function updateQBtn(locked)
@@ -348,6 +383,114 @@ local function updateZBtn()
         zFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
         zDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
     end
+end
+
+-- =============================================
+-- SAFE MODE BUTTON
+-- Black, draggable while off. Snaps to true center
+-- and turns 100% invisible only once activated.
+-- =============================================
+local safeModeBtn
+
+if IS_MOBILE then
+    safeModeBtn = Instance.new("TextButton")
+    safeModeBtn.Size = UDim2.new(0, 60, 0, 60)
+    safeModeBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+    safeModeBtn.Position = UDim2.new(0, 90, 1, -220) -- starting position, off-center, draggable
+    safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0) -- FIX: black, not red
+    safeModeBtn.BackgroundTransparency = 0
+    safeModeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    safeModeBtn.Text = "SAFE"
+    safeModeBtn.Font = Enum.Font.GothamBold
+    safeModeBtn.TextSize = 14
+    safeModeBtn.Active = true
+    safeModeBtn.ZIndex = 200 -- own dedicated top band, doesn't collide with Q/C/Z's band
+    safeModeBtn.Parent = screenGui
+    Instance.new("UICorner", safeModeBtn).CornerRadius = UDim.new(1, 0)
+    makeDraggable(safeModeBtn)
+end
+
+-- ALL buttons stored here so Safe Mode can drive full invisibility on all of them
+local allMobileButtons = {}
+if IS_MOBILE then
+    table.insert(allMobileButtons, {frame = qFrame, controls = {qBtn, qDot}})
+    table.insert(allMobileButtons, {frame = cFrame, controls = {cBtn, cDot}})
+    table.insert(allMobileButtons, {frame = zFrame, controls = {zBtn, zDot}})
+    table.insert(allMobileButtons, {frame = wlToggleBtn, controls = {}})
+    table.insert(allMobileButtons, {frame = alToggleBtn, controls = {}})
+    table.insert(allMobileButtons, {frame = emoteBtn, controls = {}})
+end
+
+local safeModeSavedPosition = nil
+
+local function applySafeModeVisual()
+    if not IS_MOBILE then return end
+
+    if getgenv().SafeMode then
+        -- Snap to true center
+        safeModeSavedPosition = safeModeBtn.Position
+        safeModeBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+        safeModeBtn.Position = UDim2.new(0.5, 0, 0.5, 0)
+
+        -- Full invisibility on Safe Mode's own button
+        safeModeBtn.BackgroundTransparency = 1
+        safeModeBtn.TextTransparency = 1
+
+        -- Full invisibility on every other button, still tappable
+        for _, entry in ipairs(allMobileButtons) do
+            entry.frame.BackgroundTransparency = 1
+            for _, ctrl in ipairs(entry.controls) do
+                if ctrl:IsA("TextButton") or ctrl:IsA("TextLabel") then
+                    ctrl.TextTransparency = 1
+                end
+                ctrl.BackgroundTransparency = 1
+            end
+        end
+    else
+        -- Restore black, restore last dragged position
+        safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        safeModeBtn.BackgroundTransparency = 0
+        safeModeBtn.TextTransparency = 0
+        if safeModeSavedPosition then
+            safeModeBtn.Position = safeModeSavedPosition
+        end
+
+        updateQBtn(getgenv().CamlockTarget ~= nil)
+        updateCBtn()
+        updateZBtn()
+        emoteBtn.BackgroundTransparency = 0.15
+        wlToggleBtn.BackgroundTransparency = 0.3
+        alToggleBtn.BackgroundTransparency = 0.3
+    end
+end
+
+local function toggleSafeMode()
+    getgenv().SafeMode = not getgenv().SafeMode
+    applySafeModeVisual()
+    if not getgenv().SafeMode then
+        notify("Safe Mode", "OFF", 2)
+    end
+    -- No "ON" notification — that would defeat the point of going invisible
+end
+
+if IS_MOBILE then
+    local safeModePressCount = 0
+    local safeModeLastPress = 0
+
+    safeModeBtn.MouseButton1Click:Connect(function()
+        local now = tick()
+        if (now - safeModeLastPress) > TRIPLE_PRESS_WINDOW then
+            safeModePressCount = 1
+        else
+            safeModePressCount = safeModePressCount + 1
+        end
+        safeModeLastPress = now
+
+        if safeModePressCount >= 3 then
+            safeModePressCount = 0
+            toggleSafeMode()
+        end
+    end)
 end
 
 -- =============================================
@@ -452,8 +595,6 @@ local function clearChildren(parent)
     end
 end
 
--- FIX 2 support: pool rows now also show pooled players who are
--- currently offline (rejoin-persistent) using their cached name
 local pooledNameCache = getgenv().PooledNameCache or {}
 getgenv().PooledNameCache = pooledNameCache
 
@@ -475,12 +616,14 @@ local function rebuildWhitelistGui()
             Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
 
             row.MouseButton1Click:Connect(function()
-                getgenv().Whitelist[player.UserId] = not getgenv().Whitelist[player.UserId] or nil
-                if getgenv().Whitelist[player.UserId] and getgenv().CamlockTarget == player then
-                    getgenv().CamlockTarget = nil
-                    updateQBtn(false)
-                end
-                rebuildWhitelistGui()
+                triplePress("wl_" .. player.UserId, function()
+                    getgenv().Whitelist[player.UserId] = not getgenv().Whitelist[player.UserId] or nil
+                    if getgenv().Whitelist[player.UserId] and getgenv().CamlockTarget == player then
+                        getgenv().CamlockTarget = nil
+                        updateQBtn(false)
+                    end
+                    rebuildWhitelistGui()
+                end)
             end)
         end
     end
@@ -511,14 +654,14 @@ local function rebuildAutoLockGui()
             Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
 
             row.MouseButton1Click:Connect(function()
-                getgenv().AutoLockPool[player.UserId] = not getgenv().AutoLockPool[player.UserId] or nil
-                rebuildAutoLockGui()
+                triplePress("al_" .. player.UserId, function()
+                    getgenv().AutoLockPool[player.UserId] = not getgenv().AutoLockPool[player.UserId] or nil
+                    rebuildAutoLockGui()
+                end)
             end)
         end
     end
 
-    -- FIX 2: show pooled-but-currently-offline players too, so it's visible
-    -- in the GUI that they're still tracked and will resume on rejoin
     for userId in pairs(getgenv().AutoLockPool) do
         if not onlineIds[userId] then
             local row = Instance.new("TextButton")
@@ -533,8 +676,10 @@ local function rebuildAutoLockGui()
             Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
 
             row.MouseButton1Click:Connect(function()
-                getgenv().AutoLockPool[userId] = nil
-                rebuildAutoLockGui()
+                triplePress("al_offline_" .. userId, function()
+                    getgenv().AutoLockPool[userId] = nil
+                    rebuildAutoLockGui()
+                end)
             end)
         end
     end
@@ -543,26 +688,34 @@ local function rebuildAutoLockGui()
 end
 
 alEnableBtn.MouseButton1Click:Connect(function()
-    getgenv().AutoLockEnabled = not getgenv().AutoLockEnabled
-    alEnableBtn.Text = "Auto-Lock: " .. (getgenv().AutoLockEnabled and "ON" or "OFF")
-    alEnableBtn.BackgroundColor3 = getgenv().AutoLockEnabled
-        and Color3.fromRGB(60, 120, 60)
-        or Color3.fromRGB(90, 80, 60)
-    if not getgenv().AutoLockEnabled then
-        alStatusLabel.Text = "Off"
-    end
+    triplePress("al_enable", function()
+        getgenv().AutoLockEnabled = not getgenv().AutoLockEnabled
+        alEnableBtn.Text = "Auto-Lock: " .. (getgenv().AutoLockEnabled and "ON" or "OFF")
+        alEnableBtn.BackgroundColor3 = getgenv().AutoLockEnabled
+            and Color3.fromRGB(60, 120, 60)
+            or Color3.fromRGB(90, 80, 60)
+        if not getgenv().AutoLockEnabled then
+            alStatusLabel.Text = "Off"
+        end
+    end)
 end)
 
 if IS_MOBILE then
     wlToggleBtn.MouseButton1Click:Connect(function()
-        whitelistGui.Visible = not whitelistGui.Visible
+        triplePress("wl_toggle", function()
+            whitelistGui.Visible = not whitelistGui.Visible
+        end)
     end)
     alToggleBtn.MouseButton1Click:Connect(function()
-        autoLockGui.Visible = not autoLockGui.Visible
+        triplePress("al_toggle", function()
+            autoLockGui.Visible = not autoLockGui.Visible
+        end)
     end)
     zBtn.MouseButton1Click:Connect(function()
-        getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
-        updateZBtn()
+        triplePress("z_btn", function()
+            getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
+            updateZBtn()
+        end)
     end)
 end
 
@@ -662,9 +815,11 @@ end
 
 if IS_MOBILE then
     cBtn.MouseButton1Click:Connect(function()
-        getgenv().HitboxVisible = not getgenv().HitboxVisible
-        updateVisibility()
-        updateCBtn()
+        triplePress("c_btn", function()
+            getgenv().HitboxVisible = not getgenv().HitboxVisible
+            updateVisibility()
+            updateCBtn()
+        end)
     end)
 end
 
@@ -678,6 +833,12 @@ local function isKnockedOrDead(player)
     local ok, health = pcall(function() return humanoid.Health end)
     if not ok then return true end
     return health <= KNOCK_THRESHOLD
+end
+
+local function isEligibleTarget(player)
+    if isKnockedOrDead(player) then return false end
+    if pendingRelock[player.UserId] then return false end
+    return true
 end
 
 local function hasLineOfSight(targetHRP)
@@ -727,7 +888,7 @@ local function getPlayerInCrosshair()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and not getgenv().Whitelist[player.UserId] and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-            if hrp and hrp:IsDescendantOf(workspace) and not isKnockedOrDead(player) then
+            if hrp and hrp:IsDescendantOf(workspace) and isEligibleTarget(player) then
                 if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
                     local dot = look:Dot((hrp.Position - camPos).Unit)
                     if dot > bestDot then
@@ -741,11 +902,6 @@ local function getPlayerInCrosshair()
     return best
 end
 
--- FIX 1: when the current best and a challenger are BOTH at full health,
--- distance becomes the deciding factor instead of only tie-breaking on
--- exact-equal health values (which almost never happens outside full HP)
--- FIX 2: pool membership is NEVER cleared on PlayerRemoving anymore —
--- only manual toggle in the AL GUI or explicit leave-cleanup removes it
 local function getAutoLockTarget()
     local best, bestHealth, bestDist = nil, math.huge, math.huge
     local localChar = LocalPlayer.Character
@@ -755,9 +911,9 @@ local function getAutoLockTarget()
     for userId in pairs(getgenv().AutoLockPool) do
         if userId ~= LocalPlayer.UserId then
             local player = Players:GetPlayerByUserId(userId)
-            -- no longer purges pool on missing player — offline pooled players
-            -- just get skipped this pass, exactly like a knocked player would be
-            if player and player ~= LocalPlayer and not getgenv().Whitelist[userId] and player.Character then
+            if player and player ~= LocalPlayer and not getgenv().Whitelist[userId]
+                and player.Character and not pendingRelock[userId] then
+
                 local hum = player.Character:FindFirstChildOfClass("Humanoid")
                 local hrp = player.Character:FindFirstChild("HumanoidRootPart")
 
@@ -767,13 +923,11 @@ local function getAutoLockTarget()
                     if ok and health > KNOCK_THRESHOLD then
                         if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
                             local dist = (hrp.Position - localHRP.Position).Magnitude
-
                             local bothFull = (health >= MAX_HEALTH) and (bestHealth >= MAX_HEALTH)
 
                             if best == nil then
                                 bestHealth, bestDist, best = health, dist, player
                             elseif bothFull then
-                                -- FIX 1: both full health — nearest wins outright
                                 if dist < bestDist then
                                     bestHealth, bestDist, best = health, dist, player
                                 end
@@ -797,11 +951,17 @@ local function releaseTarget()
 end
 
 local function handleQ()
-    if isTyping() then return end
+    if DEBUG_MODE then print("[Q] handleQ fired") end
+    if isTyping() then
+        if DEBUG_MODE then print("[Q] blocked — typing detected") end
+        return
+    end
     if getgenv().CamlockTarget then
+        if DEBUG_MODE then print("[Q] releasing current target") end
         releaseTarget()
     else
         local target = getPlayerInCrosshair()
+        if DEBUG_MODE then print("[Q] crosshair target: " .. (target and target.Name or "none")) end
         if target and target ~= LocalPlayer then
             getgenv().CamlockTarget = target
             updateQBtn(true)
@@ -810,13 +970,45 @@ local function handleQ()
 end
 
 if IS_MOBILE then
-    qBtn.MouseButton1Click:Connect(handleQ)
+    qBtn.MouseButton1Click:Connect(function()
+        if DEBUG_MODE then print("[Q] button tap registered") end
+        triplePress("q_btn", handleQ)
+    end)
 end
 
 Camera.CameraType = Enum.CameraType.Custom
 pcall(function() RunService:UnbindFromRenderStep("DemigodCamlock") end)
 
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
+    local localChar = LocalPlayer.Character
+    local localHum = localChar and localChar:FindFirstChildOfClass("Humanoid")
+    if localHum then
+        local ok, localHealth = pcall(function() return localHum.Health end)
+        if ok and localHealth < LOCAL_HEALTH_GATE then
+            if getgenv().CamlockTarget then releaseTarget() end
+            return
+        end
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local userId = player.UserId
+            if player.Character then
+                local hum = player.Character:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    local ok, health = pcall(function() return hum.Health end)
+                    if ok then
+                        if health <= KNOCK_THRESHOLD then
+                            pendingRelock[userId] = true
+                        elseif pendingRelock[userId] and health >= RELOCK_THRESHOLD then
+                            pendingRelock[userId] = nil
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     if getgenv().AutoLockEnabled then
         if next(getgenv().AutoLockPool) ~= nil then
             local autoTarget = getAutoLockTarget()
@@ -839,6 +1031,7 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
 
     if target == LocalPlayer then releaseTarget(); return end
     if getgenv().Whitelist[target.UserId] then releaseTarget(); return end
+    if pendingRelock[target.UserId] then releaseTarget(); return end
 
     if not target.Character then releaseTarget(); return end
 
@@ -949,25 +1142,49 @@ local function validateHitboxes()
 end
 
 -- =============================================
--- KEYBINDS
+-- KEYBINDS (PC)
 -- =============================================
+local pPressCount = 0
+local pLastPress = 0
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if isTyping() then return end
 
     if input.KeyCode == Enum.KeyCode.Q then
-        handleQ()
+        triplePress("q_key", handleQ)
     elseif input.KeyCode == Enum.KeyCode.C then
-        getgenv().HitboxVisible = not getgenv().HitboxVisible
-        updateVisibility()
-        updateCBtn()
+        triplePress("c_key", function()
+            getgenv().HitboxVisible = not getgenv().HitboxVisible
+            updateVisibility()
+            updateCBtn()
+        end)
     elseif input.KeyCode == Enum.KeyCode.Z then
-        getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
-        updateZBtn()
+        triplePress("z_key", function()
+            getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
+            updateZBtn()
+        end)
     elseif input.KeyCode == Enum.KeyCode.J then
-        whitelistGui.Visible = not whitelistGui.Visible
+        triplePress("j_key", function()
+            whitelistGui.Visible = not whitelistGui.Visible
+        end)
     elseif input.KeyCode == Enum.KeyCode.K then
-        autoLockGui.Visible = not autoLockGui.Visible
+        triplePress("k_key", function()
+            autoLockGui.Visible = not autoLockGui.Visible
+        end)
+    elseif input.KeyCode == Enum.KeyCode.P then
+        local now = tick()
+        if (now - pLastPress) > TRIPLE_PRESS_WINDOW then
+            pPressCount = 1
+        else
+            pPressCount = pPressCount + 1
+        end
+        pLastPress = now
+
+        if pPressCount >= 3 then
+            pPressCount = 0
+            toggleSafeMode()
+        end
     end
 end)
 
@@ -990,7 +1207,6 @@ end
 
 Players.PlayerAdded:Connect(function(player)
     setupPlayer(player)
-    -- FIX 2: no pool re-sync needed on rejoin, membership was never cleared
     rebuildWhitelistGui()
     rebuildAutoLockGui()
 end)
@@ -1009,9 +1225,7 @@ Players.PlayerRemoving:Connect(function(player)
     end
     lastVelocityCache[userId] = nil
     getgenv().Whitelist[userId] = nil
-    -- FIX 2: AutoLockPool[userId] is intentionally NOT cleared here anymore.
-    -- Leaving no longer purges pool membership — only manual removal via
-    -- the AL GUI does. This is what makes rejoin-persistence work.
+    pendingRelock[userId] = nil
     if getgenv().CamlockTarget == player then releaseTarget() end
     rebuildWhitelistGui()
     rebuildAutoLockGui()
@@ -1029,5 +1243,5 @@ rebuildAutoLockGui()
 updateQBtn(false)
 updateCBtn()
 updateZBtn()
-notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | C: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock", 6)
+notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | C: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
 print("Demigod script loaded — Mode: " .. getgenv().ScriptMode)
