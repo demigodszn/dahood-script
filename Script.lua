@@ -1,7 +1,7 @@
 -- =============================================
 -- MODE SELECTION — must run first
 -- =============================================
-getgenv().CamlockTarget = nil -- hard reset on every execution, kills stale cross-session references
+getgenv().CamlockTarget = nil
 getgenv().ScriptMode = getgenv().ScriptMode or nil
 
 if not getgenv().ScriptMode then
@@ -70,8 +70,7 @@ getgenv().HitboxSize = Vector3.new(8, 8, 8)
 getgenv().TargetPart = "HumanoidRootPart"
 getgenv().Enabled = true
 getgenv().HitboxVisible = true
--- CamlockTarget already reset above
-getgenv().WallCheckEnabled = true -- default ON now, Z disables it
+getgenv().WallCheckEnabled = true
 getgenv().Whitelist = getgenv().Whitelist or {}
 getgenv().AutoLockPool = getgenv().AutoLockPool or {}
 getgenv().AutoLockEnabled = false
@@ -81,7 +80,7 @@ local AIM_OFFSET = Vector3.new(0, 1.6, 0)
 local PING_MIN = 0.059
 local PING_MAX = 0.080
 local KNOCK_THRESHOLD = 2
-local MACRO_ACCEL_CLAMP = 220 -- was 80, raised to track macro burst velocity without overshoot-correct shake
+local MACRO_ACCEL_CLAMP = 220
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -118,9 +117,6 @@ screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
 screenGui.Parent = LocalPlayer.PlayerGui
 
--- =============================================
--- DRAG HELPER (shared by emote/inventory buttons)
--- =============================================
 local function makeDraggable(frame)
     local dragging = false
     local dragStart, startPos
@@ -207,7 +203,6 @@ if IS_MOBILE then
     cDot.Parent = cFrame
     Instance.new("UICorner", cDot).CornerRadius = UDim.new(1, 0)
 
-    -- Z button — wall check toggle
     zFrame = Instance.new("Frame")
     zFrame.Size = UDim2.new(0, 50, 0, 50)
     zFrame.Position = UDim2.new(0.5, 30, 1, -120)
@@ -229,11 +224,10 @@ if IS_MOBILE then
     zDot = Instance.new("Frame")
     zDot.Size = UDim2.new(0, 10, 0, 10)
     zDot.Position = UDim2.new(1, -2, 0, -2)
-    zDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100) -- starts green, wall check defaults ON
+    zDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
     zDot.Parent = zFrame
     Instance.new("UICorner", zDot).CornerRadius = UDim.new(1, 0)
 
-    -- WL/AL moved off the bottom row entirely — top-right stack now
     wlToggleBtn = Instance.new("TextButton")
     wlToggleBtn.Size = UDim2.new(0, 46, 0, 46)
     wlToggleBtn.Position = UDim2.new(1, -56, 0, 90)
@@ -259,10 +253,10 @@ if IS_MOBILE then
     Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(1, 0)
 end
 
--- Emote-tab shortcut — draggable, both modes
+-- Emote-tab shortcut only — inventory button removed per request
 local emoteBtn = Instance.new("TextButton")
 emoteBtn.Size = UDim2.new(0, 56, 0, 56)
-emoteBtn.Position = UDim2.new(0, 20, 0.5, -60)
+emoteBtn.Position = UDim2.new(0, 20, 0.5, -28)
 emoteBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
 emoteBtn.BackgroundTransparency = 0.15
 emoteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -275,54 +269,30 @@ Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
 makeDraggable(emoteBtn)
 
 emoteBtn.MouseButton1Click:Connect(function()
-    local opened = pcall(function()
-        StarterGui:SetCore("ResetButtonCallback", true) -- ensures core UI is responsive
+    local succeeded = false
+
+    local ok1 = pcall(function()
         local CoreGui = game:GetService("CoreGui")
-        local success = pcall(function()
-            require(CoreGui.RobloxGui.Modules.EmotesMenu.EmotesMenuMaster).ToggleEmotesMenu()
-        end)
-        if not success then
-            -- Fallback: simulate the default emote menu hotkey
-            local VIM = game:GetService("VirtualInputManager")
-            VIM:SendKeyEvent(true, Enum.KeyCode.B, false, game)
-            task.wait(0.05)
-            VIM:SendKeyEvent(false, Enum.KeyCode.B, false, game)
-        end
+        local module = CoreGui:WaitForChild("RobloxGui", 1)
+            :WaitForChild("Modules", 1)
+            :WaitForChild("EmotesMenu", 1)
+            :WaitForChild("EmotesMenuMaster", 1)
+        require(module).ToggleEmotesMenu()
     end)
-    if not opened then
-        notify("Emote", "Couldn't open menu — this game may not expose it the standard way", 3)
+    if ok1 then succeeded = true end
+
+    if not succeeded then
+        local ok2 = pcall(function()
+            local VIM = game:GetService("VirtualInputManager")
+            VIM:SendKeyEvent(true, Enum.KeyCode.K, false, game)
+            task.wait(0.05)
+            VIM:SendKeyEvent(false, Enum.KeyCode.K, false, game)
+        end)
+        if ok2 then succeeded = true end
     end
-end)
 
--- Inventory-tab shortcut — draggable, both modes
-local invBtn = Instance.new("TextButton")
-invBtn.Size = UDim2.new(0, 56, 0, 56)
-invBtn.Position = UDim2.new(0, 20, 0.5, 10)
-invBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
-invBtn.BackgroundTransparency = 0.15
-invBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-invBtn.Text = "🎒"
-invBtn.Font = Enum.Font.GothamBold
-invBtn.TextSize = 24
-invBtn.Active = true
-invBtn.Parent = screenGui
-Instance.new("UICorner", invBtn).CornerRadius = UDim.new(1, 0)
-makeDraggable(invBtn)
-
-invBtn.MouseButton1Click:Connect(function()
-    local opened = pcall(function()
-        local success = pcall(function()
-            StarterGui:SetCore("SetInventoryEnabled", true)
-        end)
-        if not success then
-            local VIM = game:GetService("VirtualInputManager")
-            VIM:SendKeyEvent(true, Enum.KeyCode.Backquote, false, game)
-            task.wait(0.05)
-            VIM:SendKeyEvent(false, Enum.KeyCode.Backquote, false, game)
-        end
-    end)
-    if not opened then
-        notify("Inventory", "Couldn't open menu — this game may not expose it the standard way", 3)
+    if not succeeded then
+        notify("Emote", "Da Hood doesn't expose a standard emote menu hook — try the game's own emote hotkey manually", 4)
     end
 end)
 
@@ -424,7 +394,6 @@ alEnableBtn.TextSize = 12
 alEnableBtn.Parent = autoLockGui
 Instance.new("UICorner", alEnableBtn).CornerRadius = UDim.new(0, 6)
 
--- Status label — makes "off" vs "on but pool empty" visibly different
 local alStatusLabel = Instance.new("TextLabel")
 alStatusLabel.Size = UDim2.new(1, -10, 0, 20)
 alStatusLabel.Position = UDim2.new(0, 5, 0, 62)
@@ -672,8 +641,6 @@ local function getAcceleration(player, velocity)
     return accel
 end
 
--- Wider accel clamp handles macro burst velocity without the
--- correction shake that came from clamping too tight at 80
 local function getPredictedPosition(targetHRP, player)
     local ping = math.clamp(LocalPlayer:GetNetworkPing(), PING_MIN, PING_MAX)
     local vel = targetHRP.AssemblyLinearVelocity
@@ -708,6 +675,9 @@ local function getPlayerInCrosshair()
     return best
 end
 
+-- Pool membership only clears when a player actually leaves the server.
+-- Knocked players are skipped this pass (not removed) so respawn brings
+-- them back into rotation automatically.
 local function getAutoLockTarget()
     local best, bestHealth, bestDist = nil, math.huge, math.huge
     local localChar = LocalPlayer.Character
@@ -715,10 +685,11 @@ local function getAutoLockTarget()
     if not localHRP then return nil end
 
     for userId in pairs(getgenv().AutoLockPool) do
-        -- explicit LocalPlayer guard on the pool itself, not just downstream
         if userId ~= LocalPlayer.UserId then
             local player = Players:GetPlayerByUserId(userId)
-            if player and player ~= LocalPlayer and not getgenv().Whitelist[userId] and player.Character then
+            if not player then
+                getgenv().AutoLockPool[userId] = nil -- left the server, actually remove
+            elseif player ~= LocalPlayer and not getgenv().Whitelist[userId] and player.Character then
                 local hum = player.Character:FindFirstChildOfClass("Humanoid")
                 local hrp = player.Character:FindFirstChild("HumanoidRootPart")
 
@@ -734,15 +705,13 @@ local function getAutoLockTarget()
                                 best = player
                             end
                         end
-                    else
-                        getgenv().AutoLockPool[userId] = nil -- knocked/dead, drop from pool, toggle stays untouched
                     end
-                else
-                    getgenv().AutoLockPool[userId] = nil -- character gone, drop from pool, toggle stays untouched
+                    -- knocked/dead: skipped, stays in pool for respawn
                 end
+                -- mid-respawn, no character yet: skipped, stays in pool
             end
         else
-            getgenv().AutoLockPool[userId] = nil -- safety: never allow self in the pool
+            getgenv().AutoLockPool[userId] = nil
         end
     end
     return best
@@ -774,8 +743,6 @@ Camera.CameraType = Enum.CameraType.Custom
 pcall(function() RunService:UnbindFromRenderStep("DemigodCamlock") end)
 
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
-    -- Auto-Lock releases on death WITHOUT touching AutoLockEnabled.
-    -- "Off" (toggle false) and "on with empty pool" are now visibly different states.
     if getgenv().AutoLockEnabled then
         if next(getgenv().AutoLockPool) ~= nil then
             local autoTarget = getAutoLockTarget()
@@ -784,9 +751,8 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
                 updateQBtn(true)
                 if IS_MOBILE then alStatusLabel.Text = "Tracking: " .. autoTarget.Name end
             else
-                -- current auto target died/knocked — release only, toggle untouched
                 if getgenv().CamlockTarget then releaseTarget() end
-                if IS_MOBILE then alStatusLabel.Text = "Pool empty" end
+                if IS_MOBILE then alStatusLabel.Text = "Pool: waiting on respawn" end
             end
         else
             if getgenv().CamlockTarget then releaseTarget() end
@@ -797,7 +763,6 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     local target = getgenv().CamlockTarget
     if not target then return end
 
-    -- Hard LocalPlayer guard — checked every single frame, first thing
     if target == LocalPlayer then releaseTarget(); return end
     if getgenv().Whitelist[target.UserId] then releaseTarget(); return end
 
@@ -987,5 +952,5 @@ rebuildAutoLockGui()
 updateQBtn(false)
 updateCBtn()
 updateZBtn()
-notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | C: Visibility | Z: Wall (default ON) | J: Whitelist | K: Auto-Lock", 6)
+notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | C: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock", 6)
 print("Demigod script loaded — Mode: " .. getgenv().ScriptMode)
