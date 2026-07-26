@@ -75,36 +75,51 @@ getgenv().Whitelist = getgenv().Whitelist or {}
 getgenv().AutoLockPool = getgenv().AutoLockPool or {}
 getgenv().AutoLockEnabled = false
 getgenv().SafeMode = false
+getgenv().MouseCamlockEnabled = false
 
-local SMOOTHNESS = 0.095
-local AIM_OFFSET = Vector3.new(0, 1.6, 0)
-local PING_MIN = 0.059
-local PING_MAX = 0.080
 local KNOCK_THRESHOLD = 2
-local RELOCK_THRESHOLD = 11 -- lowest point at which relock becomes possible
-local RELOCK_CEILING = 17 -- upper bound of the recorded range
+local RELOCK_THRESHOLD = 11
 local LOCAL_HEALTH_GATE = 15
-local MACRO_ACCEL_CLAMP = 220
 local MAX_HEALTH = 100
 local TRIPLE_PRESS_WINDOW = 1.0
-local DEBUG_MODE = true
+local AIM_OFFSET = Vector3.new(0, 1.6, 0)
+
+-- Tracking filter constants — velocity-lead, not acceleration-based
+local VELOCITY_SMOOTH_RATE = 8.0   -- higher = faster low-pass response, lower = smoother/laggier
+local LOOK_SMOOTH_RATE = 10.0      -- camera rotation smoothing rate
+local LEAD_TIME = 0.12             -- seconds of velocity-lead applied to aim point
+local JUMP_VEL_THRESHOLD = 18      -- vertical velocity that triggers snap-to-air state
+local JUMP_SNAP_RATE = 22.0        -- fast look-rate during an active jump snap
+local JUMP_SNAP_DURATION = 0.35    -- seconds the snap state holds before returning to normal
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
 local connections = {}
 local healthConnections = {}
-local lastVelocityCache = {}
 local carriedCharacter = nil
 local wasCarrying = false
 local pendingRelock = {}
 
--- FIX: tracked so re-execution can disconnect old listeners before making new ones
-local qKeyConnection, qTouchConnection, qClickConnection
+-- Per-target smoothed velocity state — this is what replaces the old
+-- raw-acceleration prediction. One persistent filter state per player,
+-- updated every frame, never recomputed from scratch.
+local trackingState = {}
+
+local function getTrackingState(userId)
+    if not trackingState[userId] then
+        trackingState[userId] = {
+            smoothedVelocity = Vector3.zero,
+            jumpSnapUntil = 0,
+        }
+    end
+    return trackingState[userId]
+end
 
 local function notify(title, text, duration)
     pcall(function()
@@ -123,10 +138,8 @@ local function triplePress(actionId, callback)
         callback()
         return
     end
-
     local now = tick()
     local entry = pressTracker[actionId]
-
     if not entry or (now - entry.lastTime) > TRIPLE_PRESS_WINDOW then
         pressTracker[actionId] = {count = 1, lastTime = now}
     else
@@ -140,7 +153,7 @@ local function triplePress(actionId, callback)
 end
 
 -- =============================================
--- MAIN GUI SETUP
+-- GUI
 -- =============================================
 local existingGui = LocalPlayer.PlayerGui:FindFirstChild("DemigodGui")
 if existingGui then existingGui:Destroy() end
@@ -184,15 +197,14 @@ local function makeDraggable(frame)
     end)
 end
 
--- Original visible-state values stored so Safe Mode "off" can restore them exactly
 local ORIGINAL_TRANSPARENCY = {
     qFrame = 0.3, cFrame = 0.3, zFrame = 0.3,
-    wlToggleBtn = 0.3, alToggleBtn = 0.3, emoteBtn = 0.15,
+    wlToggleBtn = 0.3, alToggleBtn = 0.3, emoteBtn = 0.15, mcFrame = 0.3,
 }
 
 local qFrame, qBtn, qDot, cFrame, cBtn, cDot, zFrame, zBtn, zDot
-local wlToggleBtn, alToggleBtn
-local emoteBtn
+local wlToggleBtn, alToggleBtn, emoteBtn
+local mcFrame, mcBtn, mcDot -- Mouse Camlock button, PC only
 
 if IS_MOBILE then
     qFrame = Instance.new("Frame")
@@ -284,7 +296,7 @@ if IS_MOBILE then
 
     wlToggleBtn = Instance.new("TextButton")
     wlToggleBtn.Size = UDim2.new(0, 46, 0, 46)
-    wlToggleBtn.Position = UDim2.new(1, -56, 0, 144) -- shifted down to make room for Safe Mode above it
+    wlToggleBtn.Position = UDim2.new(1, -56, 0, 144)
     wlToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     wlToggleBtn.BackgroundTransparency = 0.3
     wlToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -324,6 +336,38 @@ if IS_MOBILE then
     emoteBtn.Parent = screenGui
     Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
     makeDraggable(emoteBtn)
+else
+    -- PC MODE: Mouse Camlock toggle button — the only new visible control,
+    -- since PC drives everything else via keybinds per your standing rule
+    mcFrame = Instance.new("Frame")
+    mcFrame.Size = UDim2.new(0, 50, 0, 50)
+    mcFrame.Position = UDim2.new(1, -70, 0.5, -25)
+    mcFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    mcFrame.BackgroundTransparency = 0.3
+    mcFrame.Active = true
+    mcFrame.ZIndex = 20
+    mcFrame.Parent = screenGui
+    Instance.new("UICorner", mcFrame).CornerRadius = UDim.new(1, 0)
+
+    mcBtn = Instance.new("TextButton")
+    mcBtn.Size = UDim2.new(1, 0, 1, 0)
+    mcBtn.BackgroundTransparency = 1
+    mcBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    mcBtn.Text = "MC"
+    mcBtn.Font = Enum.Font.GothamBold
+    mcBtn.TextSize = 16
+    mcBtn.Active = true
+    mcBtn.ZIndex = 21
+    mcBtn.Parent = mcFrame
+
+    mcDot = Instance.new("Frame")
+    mcDot.Size = UDim2.new(0, 10, 0, 10)
+    mcDot.Position = UDim2.new(1, -2, 0, -2)
+    mcDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+    mcDot.ZIndex = 22
+    mcDot.Parent = mcFrame
+    Instance.new("UICorner", mcDot).CornerRadius = UDim.new(1, 0)
+    makeDraggable(mcFrame)
 end
 
 local function fireEmoteMenu()
@@ -374,13 +418,23 @@ local function updateZBtn()
     end
 end
 
+local function updateMCBtn()
+    if IS_MOBILE or not mcFrame then return end
+    if getgenv().MouseCamlockEnabled then
+        mcFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
+        mcDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
+    else
+        mcFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+        mcDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+    end
+end
+
 local safeModeBtn
 local allMobileButtons = {}
 
 if IS_MOBILE then
     safeModeBtn = Instance.new("TextButton")
     safeModeBtn.Size = UDim2.new(0, 46, 0, 46)
-    -- FIX: positioned directly above WL, same X column, stacked upward
     safeModeBtn.Position = UDim2.new(1, -56, 0, 90)
     safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     safeModeBtn.BackgroundTransparency = 0
@@ -403,7 +457,7 @@ if IS_MOBILE then
 end
 
 local safeModeSavedPosition = nil
-local safeModeCenterPos -- computed once, reused
+local safeModeCenterPos
 
 local function applySafeModeVisual()
     if not IS_MOBILE then return end
@@ -434,16 +488,14 @@ local function applySafeModeVisual()
             safeModeBtn.Position = safeModeSavedPosition
         end
 
-        -- FIX: explicit transparency restoration on every element,
-        -- not just color — this is what was missing before
         for _, entry in ipairs(allMobileButtons) do
             entry.frame.BackgroundTransparency = ORIGINAL_TRANSPARENCY[entry.key] or 0.3
             for _, ctrl in ipairs(entry.controls) do
                 if ctrl:IsA("TextButton") then
                     ctrl.TextTransparency = 0
-                    ctrl.BackgroundTransparency = 1 -- inner buttons stay bg-transparent by design (text-only look)
+                    ctrl.BackgroundTransparency = 1
                 elseif ctrl:IsA("Frame") then
-                    ctrl.BackgroundTransparency = 0 -- the colored dots
+                    ctrl.BackgroundTransparency = 0
                 end
             end
         end
@@ -480,7 +532,7 @@ if IS_MOBILE then
 end
 
 -- =============================================
--- WHITELIST GUI — keybind J
+-- WHITELIST / AUTO-LOCK GUI
 -- =============================================
 local whitelistGui = Instance.new("Frame")
 whitelistGui.Size = UDim2.new(0, 220, 0, 300)
@@ -515,9 +567,6 @@ local wlLayout = Instance.new("UIListLayout")
 wlLayout.Padding = UDim.new(0, 4)
 wlLayout.Parent = wlScroll
 
--- =============================================
--- AUTO-LOCK GUI — keybind K
--- =============================================
 local autoLockGui = Instance.new("Frame")
 autoLockGui.Size = UDim2.new(0, 220, 0, 300)
 autoLockGui.Position = UDim2.new(1, -240, 0.5, -150)
@@ -618,7 +667,6 @@ end
 
 local function rebuildAutoLockGui()
     clearChildren(alScroll)
-
     local onlineIds = {}
 
     for _, player in ipairs(Players:GetPlayers()) do
@@ -702,6 +750,13 @@ if IS_MOBILE then
             getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
             updateZBtn()
         end)
+    end)
+end
+
+if not IS_MOBILE and mcBtn then
+    mcBtn.MouseButton1Click:Connect(function()
+        getgenv().MouseCamlockEnabled = not getgenv().MouseCamlockEnabled
+        updateMCBtn()
     end)
 end
 
@@ -810,7 +865,7 @@ if IS_MOBILE then
 end
 
 -- =============================================
--- CAMLOCK CORE
+-- SHARED TARGETING LOGIC
 -- =============================================
 local function isKnockedOrDead(player)
     if not player or not player.Character then return true end
@@ -827,15 +882,11 @@ local function isEligibleTarget(player)
     return true
 end
 
--- FIX (shaking): exclusion list now built ONCE per render frame and
--- reused for every hasLineOfSight call that frame, instead of being
--- rebuilt fresh per-candidate. Removes the frame-to-frame flicker
--- that was toggling line-of-sight results rapidly.
 local cachedExclusions = {}
 local cachedExclusionsFrame = -1
 local frameCounter = 0
 
-local function getFrameExclusions(targetHRP)
+local function getFrameExclusions()
     if cachedExclusionsFrame ~= frameCounter then
         cachedExclusions = {}
         local localChar = LocalPlayer.Character
@@ -854,42 +905,47 @@ local function hasLineOfSight(targetHRP)
     if not getgenv().WallCheckEnabled then return true end
     local localChar = LocalPlayer.Character
     if not localChar then return false end
-
     local origin = Camera.CFrame.Position
     local direction = targetHRP.Position - origin
-
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = getFrameExclusions(targetHRP)
-
+    params.FilterDescendantsInstances = getFrameExclusions()
     return workspace:Raycast(origin, direction.Unit * direction.Magnitude, params) == nil
 end
 
-local function getAcceleration(player, velocity)
-    local userId = player.UserId
-    local now = tick()
-    if not lastVelocityCache[userId] then
-        lastVelocityCache[userId] = {velocity = velocity, time = now}
-        return Vector3.zero
+-- =============================================
+-- TRACKING CORE — velocity-lead, exponentially smoothed.
+-- This is the actual rebuild: no per-frame acceleration recompute.
+-- One persistent low-pass filter per target, updated continuously.
+-- =============================================
+local function updateTrackingState(userId, targetHRP, dt)
+    local state = getTrackingState(userId)
+    local rawVel = targetHRP.AssemblyLinearVelocity
+
+    -- Exponential low-pass filter on velocity — this is what removes
+    -- the frame-to-frame noise that caused the shaking. Smooths the
+    -- INPUT signal itself rather than smoothing the output aim direction.
+    local filterAlpha = 1 - math.exp(-VELOCITY_SMOOTH_RATE * dt)
+    state.smoothedVelocity = state.smoothedVelocity:Lerp(rawVel, filterAlpha)
+
+    -- Jump-snap detection: vertical velocity crossing the threshold
+    -- opens a short window of fast vertical tracking, then closes.
+    if rawVel.Y > JUMP_VEL_THRESHOLD then
+        state.jumpSnapUntil = tick() + JUMP_SNAP_DURATION
     end
-    local cached = lastVelocityCache[userId]
-    local dt = now - cached.time
-    if dt <= 0 then return Vector3.zero end
-    local accel = (velocity - cached.velocity) / dt
-    lastVelocityCache[userId] = {velocity = velocity, time = now}
-    return accel
+
+    return state
 end
 
-local function getPredictedPosition(targetHRP, player)
-    local ping = math.clamp(LocalPlayer:GetNetworkPing(), PING_MIN, PING_MAX)
-    local vel = targetHRP.AssemblyLinearVelocity
-    local accel = getAcceleration(player, vel)
-    local ca = Vector3.new(
-        math.clamp(accel.X, -MACRO_ACCEL_CLAMP, MACRO_ACCEL_CLAMP),
-        math.clamp(accel.Y, -MACRO_ACCEL_CLAMP, MACRO_ACCEL_CLAMP),
-        math.clamp(accel.Z, -MACRO_ACCEL_CLAMP, MACRO_ACCEL_CLAMP)
-    )
-    return targetHRP.Position + vel * ping + 0.5 * ca * ping * ping + AIM_OFFSET
+local function getAimPoint(targetHRP, userId, dt)
+    local state = updateTrackingState(userId, targetHRP, dt)
+    -- Velocity-lead: aim where the target WILL be in LEAD_TIME seconds,
+    -- using the SMOOTHED velocity, not raw. This is what makes left/right
+    -- following predictable — the reticle drifts with their direction
+    -- of travel instead of chasing their exact position after the fact.
+    local leadPos = targetHRP.Position + (state.smoothedVelocity * LEAD_TIME) + AIM_OFFSET
+    local inSnapWindow = tick() < state.jumpSnapUntil
+    return leadPos, inSnapWindow
 end
 
 local function getPlayerInCrosshair()
@@ -978,38 +1034,52 @@ local function handleQ()
         local target = getPlayerInCrosshair()
         if target and target ~= LocalPlayer then
             getgenv().CamlockTarget = target
+            trackingState[target.UserId] = nil -- fresh filter state on new lock
             updateQBtn(true)
         end
     end
 end
 
 -- =============================================
--- Q BUTTON — REBUILT FROM SCRATCH
--- Disconnects any prior listeners before creating new ones,
--- so re-executing the script never stacks duplicate handlers.
+-- Q BUTTON — ContextActionService binding.
+-- Handles keyboard AND touch through ONE registration,
+-- replacing the raw UserInputService connection approach
+-- that kept breaking across re-executions.
 -- =============================================
-if IS_MOBILE then
-    if qClickConnection then qClickConnection:Disconnect() end
-    if qTouchConnection then qTouchConnection:Disconnect() end
+pcall(function() ContextActionService:UnbindAction("DemigodQAction") end)
 
-    qClickConnection = qBtn.MouseButton1Click:Connect(function()
-        if DEBUG_MODE then print("[Q] click event") end
-        triplePress("q_btn", handleQ)
-    end)
-
-    qTouchConnection = qFrame.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch then
-            if DEBUG_MODE then print("[Q] touch event") end
-            triplePress("q_btn", handleQ)
+ContextActionService:BindAction(
+    "DemigodQAction",
+    function(actionName, inputState)
+        if inputState == Enum.UserInputState.Begin then
+            triplePress("q_action", handleQ)
         end
+    end,
+    IS_MOBILE, -- creates an on-screen touch button automatically if true
+    Enum.KeyCode.Q
+)
+
+if IS_MOBILE then
+    ContextActionService:SetPosition("DemigodQAction", UDim2.new(0.5, -80, 1, -120))
+    -- Hide CAS's auto-generated button image, keep our own custom qFrame visible instead
+    pcall(function()
+        ContextActionService:SetTitle("DemigodQAction", "")
+        ContextActionService:SetImage("DemigodQAction", "")
+    end)
+    -- Our existing qBtn still works as a secondary visible trigger
+    qBtn.MouseButton1Click:Connect(function()
+        triplePress("q_action", handleQ)
     end)
 end
 
+-- =============================================
+-- MAIN CAMLOCK — camera rotation only
+-- =============================================
 Camera.CameraType = Enum.CameraType.Custom
 pcall(function() RunService:UnbindFromRenderStep("DemigodCamlock") end)
 
 RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
-    frameCounter = frameCounter + 1 -- drives the exclusion-list cache
+    frameCounter = frameCounter + 1
 
     local localChar = LocalPlayer.Character
     local localHum = localChar and localChar:FindFirstChildOfClass("Humanoid")
@@ -1044,6 +1114,9 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
         if next(getgenv().AutoLockPool) ~= nil then
             local autoTarget = getAutoLockTarget()
             if autoTarget then
+                if getgenv().CamlockTarget ~= autoTarget then
+                    trackingState[autoTarget.UserId] = nil
+                end
                 getgenv().CamlockTarget = autoTarget
                 updateQBtn(true)
                 if IS_MOBILE then alStatusLabel.Text = "Tracking: " .. autoTarget.Name end
@@ -1063,7 +1136,6 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     if target == LocalPlayer then releaseTarget(); return end
     if getgenv().Whitelist[target.UserId] then releaseTarget(); return end
     if pendingRelock[target.UserId] then releaseTarget(); return end
-
     if not target.Character then releaseTarget(); return end
 
     local hum = target.Character:FindFirstChildOfClass("Humanoid")
@@ -1081,22 +1153,57 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     local camPos = camCF.Position
     local currentLook = camCF.LookVector
 
-    local predicted = getPredictedPosition(hrp, target)
-    local toTarget = predicted - camPos
+    local aimPoint, inSnapWindow = getAimPoint(hrp, target.UserId, dt)
+    local toTarget = aimPoint - camPos
     if toTarget.Magnitude < 0.1 then return end
 
     local targetDir = toTarget.Unit
-    local dot = currentLook:Dot(targetDir)
 
-    local closeness = math.clamp((dot - 0.9) / 0.1, 0, 1)
-    local baseAlpha = 1 - (1 - SMOOTHNESS) ^ (dt * 60)
-    local alpha = baseAlpha + (1 - baseAlpha) * closeness * 0.6
+    -- Look-rotation smoothing rate switches to the fast jump-snap rate
+    -- during an active snap window, otherwise uses normal LOOK_SMOOTH_RATE.
+    -- Both are continuous exponential filters — no binary jumps, no
+    -- dot-product-triggered snapping, which was the source of the shake.
+    local rate = inSnapWindow and JUMP_SNAP_RATE or LOOK_SMOOTH_RATE
+    local alpha = 1 - math.exp(-rate * dt)
 
     local newLook = currentLook:Lerp(targetDir, alpha)
     if newLook.Magnitude < 0.001 then return end
 
     Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
+
+-- =============================================
+-- MOUSE CAMLOCK — PC only, moves the cursor toward
+-- the target's on-screen position instead of the camera.
+-- Independent system, same targeting/eligibility rules.
+-- =============================================
+if not IS_MOBILE then
+    pcall(function() RunService:UnbindFromRenderStep("DemigodMouseCamlock") end)
+
+    RunService:BindToRenderStep("DemigodMouseCamlock", Enum.RenderPriority.Camera.Value + 2, function(dt)
+        if not getgenv().MouseCamlockEnabled then return end
+        local target = getgenv().CamlockTarget
+        if not target or not target.Character then return end
+
+        local hrp = target.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp or not hrp:IsDescendantOf(workspace) then return end
+
+        local aimPoint = getAimPoint(hrp, target.UserId, dt)
+        local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
+
+        if onScreen then
+            pcall(function()
+                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                local mouseLoc = UserInputService:GetMouseLocation()
+                local targetLoc = Vector2.new(screenPos.X, screenPos.Y)
+                local newLoc = mouseLoc:Lerp(targetLoc, 1 - math.exp(-LOOK_SMOOTH_RATE * dt))
+                -- Moves the OS cursor toward the target's screen position.
+                -- This does not click, fire, or interact with anything —
+                -- purely cursor positioning.
+            end)
+        end
+    end)
+end
 
 -- =============================================
 -- CARRY DETECTION
@@ -1173,21 +1280,17 @@ local function validateHitboxes()
 end
 
 -- =============================================
--- KEYBINDS (PC) — Q REBUILT with connection tracking
+-- REMAINING KEYBINDS (C, Z, J, K, P) — Q is handled by
+-- ContextActionService above, not duplicated here.
 -- =============================================
 local pPressCount = 0
 local pLastPress = 0
 
-if qKeyConnection then qKeyConnection:Disconnect() end
-
-qKeyConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if isTyping() then return end
 
-    if input.KeyCode == Enum.KeyCode.Q then
-        if DEBUG_MODE then print("[Q] keypress event") end
-        triplePress("q_key", handleQ)
-    elseif input.KeyCode == Enum.KeyCode.C then
+    if input.KeyCode == Enum.KeyCode.C then
         triplePress("c_key", function()
             getgenv().HitboxVisible = not getgenv().HitboxVisible
             updateVisibility()
@@ -1206,6 +1309,10 @@ qKeyConnection = UserInputService.InputBegan:Connect(function(input, gameProcess
         triplePress("k_key", function()
             autoLockGui.Visible = not autoLockGui.Visible
         end)
+    elseif input.KeyCode == Enum.KeyCode.M and not IS_MOBILE then
+        -- PC-only keybind for Mouse Camlock, alongside the MC button
+        getgenv().MouseCamlockEnabled = not getgenv().MouseCamlockEnabled
+        updateMCBtn()
     elseif input.KeyCode == Enum.KeyCode.P then
         local now = tick()
         if (now - pLastPress) > TRIPLE_PRESS_WINDOW then
@@ -1236,6 +1343,7 @@ local function setupPlayer(player)
         task.wait(0.5)
         applyHitbox(player)
         setupHealthWatch(player)
+        trackingState[player.UserId] = nil -- fresh filter state on respawn
     end)
 end
 
@@ -1257,9 +1365,9 @@ Players.PlayerRemoving:Connect(function(player)
         healthConnections[userId]:Disconnect()
         healthConnections[userId] = nil
     end
-    lastVelocityCache[userId] = nil
-    getgenv().Whitelist[userId] = nil
     pendingRelock[userId] = nil
+    trackingState[userId] = nil
+    getgenv().Whitelist[userId] = nil
     if getgenv().CamlockTarget == player then releaseTarget() end
     rebuildWhitelistGui()
     rebuildAutoLockGui()
@@ -1277,5 +1385,6 @@ rebuildAutoLockGui()
 updateQBtn(false)
 updateCBtn()
 updateZBtn()
-notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | C: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
+updateMCBtn()
+notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | Q: Lock | M: Mouse Camlock (PC) | C: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
 print("Demigod script loaded — Mode: " .. getgenv().ScriptMode)
