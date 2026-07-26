@@ -86,7 +86,7 @@ local LOCAL_HEALTH_GATE = 15
 local MACRO_ACCEL_CLAMP = 220
 local MAX_HEALTH = 100
 local TRIPLE_PRESS_WINDOW = 1.0
-local DEBUG_MODE = true -- prints diagnostic info for Q taps, set false once confirmed working
+local DEBUG_MODE = true
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -125,11 +125,9 @@ local function triplePress(actionId, callback)
 
     if not entry or (now - entry.lastTime) > TRIPLE_PRESS_WINDOW then
         pressTracker[actionId] = {count = 1, lastTime = now}
-        if DEBUG_MODE then print("[SafeMode] " .. actionId .. " press 1/3") end
     else
         entry.count = entry.count + 1
         entry.lastTime = now
-        if DEBUG_MODE then print("[SafeMode] " .. actionId .. " press " .. entry.count .. "/3") end
         if entry.count >= 3 then
             pressTracker[actionId] = nil
             callback()
@@ -182,25 +180,9 @@ local function makeDraggable(frame)
     end)
 end
 
--- =============================================
--- INVISIBILITY HELPER
--- Fully transparent but stays clickable — Roblox click
--- targets are hit-tested regardless of transparency.
--- =============================================
-local function makeInvisible(frame, ...)
-    frame.BackgroundTransparency = 1
-    for _, child in ipairs({...}) do
-        if child:IsA("TextButton") or child:IsA("TextLabel") then
-            child.TextTransparency = 1
-            child.BackgroundTransparency = 1
-        elseif child:IsA("Frame") then
-            child.BackgroundTransparency = 1
-        end
-    end
-end
-
 local qFrame, qBtn, qDot, cFrame, cBtn, cDot, zFrame, zBtn, zDot
 local wlToggleBtn, alToggleBtn
+local emoteBtn -- FIX: declared here, only created inside IS_MOBILE block below now
 
 if IS_MOBILE then
     qFrame = Instance.new("Frame")
@@ -209,7 +191,7 @@ if IS_MOBILE then
     qFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     qFrame.BackgroundTransparency = 0.3
     qFrame.Active = true
-    qFrame.ZIndex = 20 -- FIX: dedicated stacking band for Q, separate from Safe Mode's band
+    qFrame.ZIndex = 20
     qFrame.Parent = screenGui
     Instance.new("UICorner", qFrame).CornerRadius = UDim.new(1, 0)
 
@@ -317,40 +299,42 @@ if IS_MOBILE then
     alToggleBtn.ZIndex = 20
     alToggleBtn.Parent = screenGui
     Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(1, 0)
+
+    -- FIX 2: emote button now only exists inside IS_MOBILE — was unconditional before, showed up on PC
+    emoteBtn = Instance.new("TextButton")
+    emoteBtn.Size = UDim2.new(0, 56, 0, 56)
+    emoteBtn.Position = UDim2.new(0, 20, 0.5, -28)
+    emoteBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
+    emoteBtn.BackgroundTransparency = 0.15
+    emoteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    emoteBtn.Text = "🎭"
+    emoteBtn.Font = Enum.Font.GothamBold
+    emoteBtn.TextSize = 24
+    emoteBtn.Active = true
+    emoteBtn.ZIndex = 20
+    emoteBtn.Parent = screenGui
+    Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
+    makeDraggable(emoteBtn)
 end
 
--- Emote button — fires ONLY the Period key event. No fallback chain,
--- no CoreGui module require that might silently no-op in Da Hood.
-local emoteBtn = Instance.new("TextButton")
-emoteBtn.Size = UDim2.new(0, 56, 0, 56)
-emoteBtn.Position = UDim2.new(0, 20, 0.5, -28)
-emoteBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
-emoteBtn.BackgroundTransparency = 0.15
-emoteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-emoteBtn.Text = "🎭"
-emoteBtn.Font = Enum.Font.GothamBold
-emoteBtn.TextSize = 24
-emoteBtn.Active = true
-emoteBtn.ZIndex = 20
-emoteBtn.Parent = screenGui
-Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
-makeDraggable(emoteBtn)
-
+-- Fires a single Period key-down + key-up, identical to a normal keypress
 local function fireEmoteMenu()
     local VIM = game:GetService("VirtualInputManager")
-    local ok = pcall(function()
+    pcall(function()
         VIM:SendKeyEvent(true, Enum.KeyCode.Period, false, game)
         task.wait(0.05)
         VIM:SendKeyEvent(false, Enum.KeyCode.Period, false, game)
     end)
-    if not ok then
-        notify("Emote", "Key event failed to send — try pressing '.' manually", 3)
-    end
 end
 
-emoteBtn.MouseButton1Click:Connect(function()
-    triplePress("emote", fireEmoteMenu)
-end)
+if IS_MOBILE and emoteBtn then
+    emoteBtn.MouseButton1Click:Connect(function()
+        triplePress("emote", fireEmoteMenu)
+    end)
+end
+
+-- On PC, "." itself already opens the emote wheel directly through Da Hood's
+-- own input handling — no script involvement needed, nothing to wire here.
 
 local function updateQBtn(locked)
     if not IS_MOBILE then return end
@@ -385,40 +369,32 @@ local function updateZBtn()
     end
 end
 
--- =============================================
--- SAFE MODE BUTTON
--- Black, draggable while off. Snaps to true center
--- and turns 100% invisible only once activated.
--- =============================================
 local safeModeBtn
+local allMobileButtons = {}
 
 if IS_MOBILE then
     safeModeBtn = Instance.new("TextButton")
     safeModeBtn.Size = UDim2.new(0, 60, 0, 60)
     safeModeBtn.AnchorPoint = Vector2.new(0.5, 0.5)
-    safeModeBtn.Position = UDim2.new(0, 90, 1, -220) -- starting position, off-center, draggable
-    safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0) -- FIX: black, not red
+    safeModeBtn.Position = UDim2.new(0, 90, 1, -220)
+    safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     safeModeBtn.BackgroundTransparency = 0
     safeModeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     safeModeBtn.Text = "SAFE"
     safeModeBtn.Font = Enum.Font.GothamBold
     safeModeBtn.TextSize = 14
     safeModeBtn.Active = true
-    safeModeBtn.ZIndex = 200 -- own dedicated top band, doesn't collide with Q/C/Z's band
+    safeModeBtn.ZIndex = 200
     safeModeBtn.Parent = screenGui
     Instance.new("UICorner", safeModeBtn).CornerRadius = UDim.new(1, 0)
     makeDraggable(safeModeBtn)
-end
 
--- ALL buttons stored here so Safe Mode can drive full invisibility on all of them
-local allMobileButtons = {}
-if IS_MOBILE then
     table.insert(allMobileButtons, {frame = qFrame, controls = {qBtn, qDot}})
     table.insert(allMobileButtons, {frame = cFrame, controls = {cBtn, cDot}})
     table.insert(allMobileButtons, {frame = zFrame, controls = {zBtn, zDot}})
     table.insert(allMobileButtons, {frame = wlToggleBtn, controls = {}})
     table.insert(allMobileButtons, {frame = alToggleBtn, controls = {}})
-    table.insert(allMobileButtons, {frame = emoteBtn, controls = {}})
+    if emoteBtn then table.insert(allMobileButtons, {frame = emoteBtn, controls = {}}) end
 end
 
 local safeModeSavedPosition = nil
@@ -427,16 +403,12 @@ local function applySafeModeVisual()
     if not IS_MOBILE then return end
 
     if getgenv().SafeMode then
-        -- Snap to true center
         safeModeSavedPosition = safeModeBtn.Position
         safeModeBtn.AnchorPoint = Vector2.new(0.5, 0.5)
         safeModeBtn.Position = UDim2.new(0.5, 0, 0.5, 0)
-
-        -- Full invisibility on Safe Mode's own button
         safeModeBtn.BackgroundTransparency = 1
         safeModeBtn.TextTransparency = 1
 
-        -- Full invisibility on every other button, still tappable
         for _, entry in ipairs(allMobileButtons) do
             entry.frame.BackgroundTransparency = 1
             for _, ctrl in ipairs(entry.controls) do
@@ -447,7 +419,6 @@ local function applySafeModeVisual()
             end
         end
     else
-        -- Restore black, restore last dragged position
         safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
         safeModeBtn.BackgroundTransparency = 0
         safeModeBtn.TextTransparency = 0
@@ -458,7 +429,7 @@ local function applySafeModeVisual()
         updateQBtn(getgenv().CamlockTarget ~= nil)
         updateCBtn()
         updateZBtn()
-        emoteBtn.BackgroundTransparency = 0.15
+        if emoteBtn then emoteBtn.BackgroundTransparency = 0.15 end
         wlToggleBtn.BackgroundTransparency = 0.3
         alToggleBtn.BackgroundTransparency = 0.3
     end
@@ -467,10 +438,6 @@ end
 local function toggleSafeMode()
     getgenv().SafeMode = not getgenv().SafeMode
     applySafeModeVisual()
-    if not getgenv().SafeMode then
-        notify("Safe Mode", "OFF", 2)
-    end
-    -- No "ON" notification — that would defeat the point of going invisible
 end
 
 if IS_MOBILE then
@@ -841,15 +808,29 @@ local function isEligibleTarget(player)
     return true
 end
 
-local function hasLineOfSight(targetHRP)
+-- FIX 4: build the exclusion list fresh every raycast, adding EVERY
+-- player's character (not just yours and the target's) so that a
+-- third player standing between you and your target no longer
+-- registers as a wall block. Only real level geometry can block now.
+local function hasLineOfSight(targetHRP, targetPlayer)
     if not getgenv().WallCheckEnabled then return true end
     local localChar = LocalPlayer.Character
     if not localChar then return false end
+
     local origin = Camera.CFrame.Position
     local direction = targetHRP.Position - origin
+
+    local exclusions = {localChar, targetHRP.Parent}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character and p.Character ~= localChar and p.Character ~= targetHRP.Parent then
+            table.insert(exclusions, p.Character)
+        end
+    end
+
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {localChar, targetHRP.Parent}
+    params.FilterDescendantsInstances = exclusions
+
     return workspace:Raycast(origin, direction.Unit * direction.Magnitude, params) == nil
 end
 
@@ -889,7 +870,7 @@ local function getPlayerInCrosshair()
         if player ~= LocalPlayer and not getgenv().Whitelist[player.UserId] and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             if hrp and hrp:IsDescendantOf(workspace) and isEligibleTarget(player) then
-                if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
+                if hasLineOfSight(hrp, player) then
                     local dot = look:Dot((hrp.Position - camPos).Unit)
                     if dot > bestDot then
                         bestDot = dot
@@ -902,11 +883,15 @@ local function getPlayerInCrosshair()
     return best
 end
 
+-- FIX 5: when wall check is OFF, sort by distance only — health is
+-- ignored entirely. When wall check is ON, original health-first logic applies.
 local function getAutoLockTarget()
     local best, bestHealth, bestDist = nil, math.huge, math.huge
     local localChar = LocalPlayer.Character
     local localHRP = localChar and localChar:FindFirstChild("HumanoidRootPart")
     if not localHRP then return nil end
+
+    local wallCheckOff = not getgenv().WallCheckEnabled
 
     for userId in pairs(getgenv().AutoLockPool) do
         if userId ~= LocalPlayer.UserId then
@@ -921,18 +906,25 @@ local function getAutoLockTarget()
                     local ok, health = pcall(function() return hum.Health end)
 
                     if ok and health > KNOCK_THRESHOLD then
-                        if not getgenv().WallCheckEnabled or hasLineOfSight(hrp) then
+                        if hasLineOfSight(hrp, player) then
                             local dist = (hrp.Position - localHRP.Position).Magnitude
-                            local bothFull = (health >= MAX_HEALTH) and (bestHealth >= MAX_HEALTH)
 
-                            if best == nil then
-                                bestHealth, bestDist, best = health, dist, player
-                            elseif bothFull then
+                            if wallCheckOff then
+                                -- distance-only, health irrelevant
                                 if dist < bestDist then
+                                    bestDist, best = dist, player
+                                end
+                            else
+                                local bothFull = (health >= MAX_HEALTH) and (bestHealth >= MAX_HEALTH)
+                                if best == nil then
+                                    bestHealth, bestDist, best = health, dist, player
+                                elseif bothFull then
+                                    if dist < bestDist then
+                                        bestHealth, bestDist, best = health, dist, player
+                                    end
+                                elseif health < bestHealth or (health == bestHealth and dist < bestDist) then
                                     bestHealth, bestDist, best = health, dist, player
                                 end
-                            elseif health < bestHealth or (health == bestHealth and dist < bestDist) then
-                                bestHealth, bestDist, best = health, dist, player
                             end
                         end
                     end
@@ -952,12 +944,8 @@ end
 
 local function handleQ()
     if DEBUG_MODE then print("[Q] handleQ fired") end
-    if isTyping() then
-        if DEBUG_MODE then print("[Q] blocked — typing detected") end
-        return
-    end
+    if isTyping() then return end
     if getgenv().CamlockTarget then
-        if DEBUG_MODE then print("[Q] releasing current target") end
         releaseTarget()
     else
         local target = getPlayerInCrosshair()
@@ -971,8 +959,18 @@ end
 
 if IS_MOBILE then
     qBtn.MouseButton1Click:Connect(function()
-        if DEBUG_MODE then print("[Q] button tap registered") end
+        if DEBUG_MODE then print("[Q] MouseButton1Click fired") end
         triplePress("q_btn", handleQ)
+    end)
+
+    -- FIX 3: second independent listener on the frame itself, catching
+    -- raw Touch input directly in case MouseButton1Click's translation
+    -- layer isn't firing reliably for this element on your device
+    qFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            if DEBUG_MODE then print("[Q] raw Touch input caught on qFrame") end
+            triplePress("q_btn", handleQ)
+        end
     end)
 end
 
@@ -1044,7 +1042,8 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     local hrp = target.Character:FindFirstChild("HumanoidRootPart")
     if not hrp or not hrp:IsDescendantOf(workspace) then releaseTarget(); return end
 
-    if getgenv().WallCheckEnabled and not hasLineOfSight(hrp) then return end
+    -- FIX 4 applied here too — other players no longer break lock mid-fight
+    if not hasLineOfSight(hrp, target) then return end
 
     local camCF = Camera.CFrame
     local camPos = camCF.Position
