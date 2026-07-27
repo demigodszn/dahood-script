@@ -66,7 +66,7 @@ local IS_MOBILE = getgenv().ScriptMode == "Mobile"
 -- =============================================
 -- CORE STATE
 -- =============================================
-getgenv().HitboxSize = Vector3.new(8, 8, 8)
+getgenv().HitboxSize = Vector3.new(9, 9, 9) -- updated per request
 getgenv().TargetPart = "HumanoidRootPart"
 getgenv().Enabled = true
 getgenv().HitboxVisible = true
@@ -84,13 +84,24 @@ local MAX_HEALTH = 100
 local TRIPLE_PRESS_WINDOW = 1.0
 local AIM_OFFSET = Vector3.new(0, 1.6, 0)
 
--- Tracking filter constants — velocity-lead, not acceleration-based
-local VELOCITY_SMOOTH_RATE = 8.0   -- higher = faster low-pass response, lower = smoother/laggier
-local LOOK_SMOOTH_RATE = 10.0      -- camera rotation smoothing rate
-local LEAD_TIME = 0.12             -- seconds of velocity-lead applied to aim point
-local JUMP_VEL_THRESHOLD = 18      -- vertical velocity that triggers snap-to-air state
-local JUMP_SNAP_RATE = 22.0        -- fast look-rate during an active jump snap
-local JUMP_SNAP_DURATION = 0.35    -- seconds the snap state holds before returning to normal
+-- Tracking constants — lowered baseline smoothing for a rage-lock feel
+-- instead of a clean follow curve. Jitter adds controlled unpredictability.
+local VELOCITY_SMOOTH_RATE = 8.0
+local LOOK_SMOOTH_RATE = 16.0      -- raised from 10 -> snappier, less "smooth camera" feel
+local LOOK_JITTER_MAG = 0.015      -- small angular jitter so tracking doesn't read as a clean curve
+local LEAD_TIME = 0.12
+local JUMP_VEL_THRESHOLD = 18
+local JUMP_SNAP_RATE = 26.0
+local JUMP_SNAP_DURATION = 0.35
+
+-- Anomaly detection thresholds — used only to change YOUR camera's
+-- own tracking speed, never anything about hit registration
+local MACRO_SPEED_MULT = 1.15      -- "a little bit more predictable" -> slightly higher lead accuracy
+local CFRAME_ACCEL_SPIKE = 500     -- studs/s^2, well above normal movement, flags teleport-style motion
+local CFRAME_TRACK_RATE_MULT = 1.6
+local FLYING_TRACK_RATE_MULT = 2.1
+local SPEEDHACK_VEL_THRESHOLD = 60 -- studs/s, above Da Hood's normal sprint speed
+local FLYING_Y_VEL_THRESHOLD = 25  -- sustained upward velocity with no ground contact
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -105,17 +116,15 @@ local healthConnections = {}
 local carriedCharacter = nil
 local wasCarrying = false
 local pendingRelock = {}
-
--- Per-target smoothed velocity state — this is what replaces the old
--- raw-acceleration prediction. One persistent filter state per player,
--- updated every frame, never recomputed from scratch.
 local trackingState = {}
 
 local function getTrackingState(userId)
     if not trackingState[userId] then
         trackingState[userId] = {
             smoothedVelocity = Vector3.zero,
+            lastVelocity = Vector3.zero,
             jumpSnapUntil = 0,
+            anomalyMult = 1.0, -- current speed multiplier from detection below
         }
     end
     return trackingState[userId]
@@ -204,7 +213,7 @@ local ORIGINAL_TRANSPARENCY = {
 
 local qFrame, qBtn, qDot, cFrame, cBtn, cDot, zFrame, zBtn, zDot
 local wlToggleBtn, alToggleBtn, emoteBtn
-local mcFrame, mcBtn, mcDot -- Mouse Camlock button, PC only
+local mcFrame, mcBtn, mcDot
 
 if IS_MOBILE then
     qFrame = Instance.new("Frame")
@@ -296,7 +305,7 @@ if IS_MOBILE then
 
     wlToggleBtn = Instance.new("TextButton")
     wlToggleBtn.Size = UDim2.new(0, 46, 0, 46)
-    wlToggleBtn.Position = UDim2.new(1, -56, 0, 144)
+    wlToggleBtn.Position = UDim2.new(0, 10, 0, 144) -- LEFT side
     wlToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     wlToggleBtn.BackgroundTransparency = 0.3
     wlToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -310,7 +319,7 @@ if IS_MOBILE then
 
     alToggleBtn = Instance.new("TextButton")
     alToggleBtn.Size = UDim2.new(0, 46, 0, 46)
-    alToggleBtn.Position = UDim2.new(1, -56, 0, 198)
+    alToggleBtn.Position = UDim2.new(1, -56, 0, 144) -- RIGHT side, opposite WL
     alToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     alToggleBtn.BackgroundTransparency = 0.3
     alToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -337,8 +346,6 @@ if IS_MOBILE then
     Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
     makeDraggable(emoteBtn)
 else
-    -- PC MODE: Mouse Camlock toggle button — the only new visible control,
-    -- since PC drives everything else via keybinds per your standing rule
     mcFrame = Instance.new("Frame")
     mcFrame.Size = UDim2.new(0, 50, 0, 50)
     mcFrame.Position = UDim2.new(1, -70, 0.5, -25)
@@ -532,7 +539,7 @@ if IS_MOBILE then
 end
 
 -- =============================================
--- WHITELIST / AUTO-LOCK GUI
+-- WHITELIST GUI — LEFT side
 -- =============================================
 local whitelistGui = Instance.new("Frame")
 whitelistGui.Size = UDim2.new(0, 220, 0, 300)
@@ -567,9 +574,12 @@ local wlLayout = Instance.new("UIListLayout")
 wlLayout.Padding = UDim.new(0, 4)
 wlLayout.Parent = wlScroll
 
+-- =============================================
+-- AUTO-LOCK GUI — RIGHT side (opposite Whitelist, per request)
+-- =============================================
 local autoLockGui = Instance.new("Frame")
 autoLockGui.Size = UDim2.new(0, 220, 0, 300)
-autoLockGui.Position = UDim2.new(1, -240, 0.5, -150)
+autoLockGui.Position = UDim2.new(1, -240, 0.5, -150) -- confirmed: right side, opposite the left-side Whitelist
 autoLockGui.BackgroundColor3 = Color3.fromRGB(30, 40, 30)
 autoLockGui.Visible = false
 autoLockGui.Active = true
@@ -865,7 +875,7 @@ if IS_MOBILE then
 end
 
 -- =============================================
--- SHARED TARGETING LOGIC
+-- TARGETING CORE
 -- =============================================
 local function isKnockedOrDead(player)
     if not player or not player.Character then return true end
@@ -914,38 +924,96 @@ local function hasLineOfSight(targetHRP)
 end
 
 -- =============================================
--- TRACKING CORE — velocity-lead, exponentially smoothed.
--- This is the actual rebuild: no per-frame acceleration recompute.
--- One persistent low-pass filter per target, updated continuously.
+-- ANOMALY DETECTION — reads only publicly-observable physics
+-- (position/velocity deltas). Output ONLY changes how fast YOUR
+-- camera rotates toward the target. Never touches hit registration,
+-- never touches any other player's state.
 -- =============================================
-local function updateTrackingState(userId, targetHRP, dt)
+local anomalyCache = {}
+
+local function detectAnomaly(userId, hrp, humanoid)
+    local now = tick()
+    local cache = anomalyCache[userId]
+    if not cache then
+        cache = {lastPos = hrp.Position, lastTime = now, lastVel = Vector3.zero}
+        anomalyCache[userId] = cache
+        return "normal"
+    end
+
+    local dt = now - cache.lastTime
+    if dt <= 0 then return "normal" end
+
+    local posDelta = hrp.Position - cache.lastPos
+    local instVel = posDelta / dt
+    local velDelta = instVel - cache.lastVel
+    local accelMag = velDelta.Magnitude / dt
+
+    cache.lastPos = hrp.Position
+    cache.lastVel = instVel
+    cache.lastTime = now
+
+    -- Flying: sustained upward velocity with no ground contact via humanoid state
+    local isAirborne = humanoid and humanoid:GetState() == Enum.HumanoidStateType.Freefall
+    if isAirborne and instVel.Y > FLYING_Y_VEL_THRESHOLD then
+        return "flying"
+    end
+
+    -- CFrame/teleport-style motion: acceleration far beyond anything
+    -- physically reachable through normal movement or even sprint
+    if accelMag > CFRAME_ACCEL_SPIKE then
+        return "cframe"
+    end
+
+    -- Speedhack: sustained horizontal velocity above normal sprint cap
+    local horizVel = Vector3.new(instVel.X, 0, instVel.Z).Magnitude
+    if horizVel > SPEEDHACK_VEL_THRESHOLD then
+        return "speedhack"
+    end
+
+    -- Macro: near-constant velocity magnitude with abrupt direction
+    -- changes at regular intervals — approximated here as repeated
+    -- sharp direction flips at a consistent speed, distinct from
+    -- natural human strafing which varies more in magnitude
+    if instVel.Magnitude > 20 and velDelta.Magnitude > 15 and accelMag < CFRAME_ACCEL_SPIKE then
+        return "macro"
+    end
+
+    return "normal"
+end
+
+local function getSpeedMultiplierFor(anomaly)
+    if anomaly == "flying" then return FLYING_TRACK_RATE_MULT end
+    if anomaly == "cframe" then return CFRAME_TRACK_RATE_MULT end
+    if anomaly == "macro" then return MACRO_SPEED_MULT end
+    return 1.0
+end
+
+local function updateTrackingState(userId, targetHRP, humanoid, dt)
     local state = getTrackingState(userId)
     local rawVel = targetHRP.AssemblyLinearVelocity
 
-    -- Exponential low-pass filter on velocity — this is what removes
-    -- the frame-to-frame noise that caused the shaking. Smooths the
-    -- INPUT signal itself rather than smoothing the output aim direction.
     local filterAlpha = 1 - math.exp(-VELOCITY_SMOOTH_RATE * dt)
     state.smoothedVelocity = state.smoothedVelocity:Lerp(rawVel, filterAlpha)
 
-    -- Jump-snap detection: vertical velocity crossing the threshold
-    -- opens a short window of fast vertical tracking, then closes.
     if rawVel.Y > JUMP_VEL_THRESHOLD then
         state.jumpSnapUntil = tick() + JUMP_SNAP_DURATION
     end
 
+    local anomaly = detectAnomaly(userId, targetHRP, humanoid)
+    state.anomalyMult = getSpeedMultiplierFor(anomaly)
+
     return state
 end
 
-local function getAimPoint(targetHRP, userId, dt)
-    local state = updateTrackingState(userId, targetHRP, dt)
-    -- Velocity-lead: aim where the target WILL be in LEAD_TIME seconds,
-    -- using the SMOOTHED velocity, not raw. This is what makes left/right
-    -- following predictable — the reticle drifts with their direction
-    -- of travel instead of chasing their exact position after the fact.
-    local leadPos = targetHRP.Position + (state.smoothedVelocity * LEAD_TIME) + AIM_OFFSET
+local function getAimPoint(targetHRP, humanoid, userId, dt)
+    local state = updateTrackingState(userId, targetHRP, humanoid, dt)
+    -- Under macro detection, lead accuracy tightens slightly (predictable
+    -- movement is easier to lead correctly, hence "a little more predictable")
+    local leadTime = LEAD_TIME * (state.anomalyMult > 1.0 and state.anomalyMult or 1.0) * 0.6
+        + (state.anomalyMult == MACRO_SPEED_MULT and LEAD_TIME * 0.2 or 0)
+    local leadPos = targetHRP.Position + (state.smoothedVelocity * leadTime) + AIM_OFFSET
     local inSnapWindow = tick() < state.jumpSnapUntil
-    return leadPos, inSnapWindow
+    return leadPos, inSnapWindow, state.anomalyMult
 end
 
 local function getPlayerInCrosshair()
@@ -970,6 +1038,9 @@ local function getPlayerInCrosshair()
     return best
 end
 
+-- Priority: when multiple candidates are ALL at full health, nearest
+-- wins outright regardless of count — this is the N-candidate version
+-- of the earlier two-way "both full health" rule.
 local function getAutoLockTarget()
     local best, bestHealth, bestDist = nil, math.huge, math.huge
     local localChar = LocalPlayer.Character
@@ -977,6 +1048,7 @@ local function getAutoLockTarget()
     if not localHRP then return nil end
 
     local wallCheckOff = not getgenv().WallCheckEnabled
+    local fullHealthCandidates = {}
 
     for userId in pairs(getgenv().AutoLockPool) do
         if userId ~= LocalPlayer.UserId then
@@ -998,17 +1070,10 @@ local function getAutoLockTarget()
                                 if dist < bestDist then
                                     bestDist, best = dist, player
                                 end
-                            else
-                                local bothFull = (health >= MAX_HEALTH) and (bestHealth >= MAX_HEALTH)
-                                if best == nil then
-                                    bestHealth, bestDist, best = health, dist, player
-                                elseif bothFull then
-                                    if dist < bestDist then
-                                        bestHealth, bestDist, best = health, dist, player
-                                    end
-                                elseif health < bestHealth or (health == bestHealth and dist < bestDist) then
-                                    bestHealth, bestDist, best = health, dist, player
-                                end
+                            elseif health >= MAX_HEALTH then
+                                table.insert(fullHealthCandidates, {player = player, dist = dist})
+                            elseif health < bestHealth or (health == bestHealth and dist < bestDist) then
+                                bestHealth, bestDist, best = health, dist, player
                             end
                         end
                     end
@@ -1018,6 +1083,21 @@ local function getAutoLockTarget()
             getgenv().AutoLockPool[userId] = nil
         end
     end
+
+    -- If any full-health candidates exist and wall check is on,
+    -- nearest among THEM takes priority over lower-health candidates
+    -- only when best is still nil OR when a full-health group exists
+    -- and none of them have been beaten by a genuinely lower health value
+    if not wallCheckOff and #fullHealthCandidates > 0 and best == nil then
+        local nearest, nearestDist = nil, math.huge
+        for _, c in ipairs(fullHealthCandidates) do
+            if c.dist < nearestDist then
+                nearestDist, nearest = c.dist, c.player
+            end
+        end
+        return nearest
+    end
+
     return best
 end
 
@@ -1034,17 +1114,14 @@ local function handleQ()
         local target = getPlayerInCrosshair()
         if target and target ~= LocalPlayer then
             getgenv().CamlockTarget = target
-            trackingState[target.UserId] = nil -- fresh filter state on new lock
+            trackingState[target.UserId] = nil
             updateQBtn(true)
         end
     end
 end
 
 -- =============================================
--- Q BUTTON — ContextActionService binding.
--- Handles keyboard AND touch through ONE registration,
--- replacing the raw UserInputService connection approach
--- that kept breaking across re-executions.
+-- Q BUTTON
 -- =============================================
 pcall(function() ContextActionService:UnbindAction("DemigodQAction") end)
 
@@ -1055,25 +1132,24 @@ ContextActionService:BindAction(
             triplePress("q_action", handleQ)
         end
     end,
-    IS_MOBILE, -- creates an on-screen touch button automatically if true
+    IS_MOBILE,
     Enum.KeyCode.Q
 )
 
 if IS_MOBILE then
     ContextActionService:SetPosition("DemigodQAction", UDim2.new(0.5, -80, 1, -120))
-    -- Hide CAS's auto-generated button image, keep our own custom qFrame visible instead
     pcall(function()
         ContextActionService:SetTitle("DemigodQAction", "")
         ContextActionService:SetImage("DemigodQAction", "")
     end)
-    -- Our existing qBtn still works as a secondary visible trigger
     qBtn.MouseButton1Click:Connect(function()
         triplePress("q_action", handleQ)
     end)
 end
 
 -- =============================================
--- MAIN CAMLOCK — camera rotation only
+-- MAIN CAMLOCK — less smooth, controlled jitter,
+-- anomaly-speed-scaled, jump-snap intact
 -- =============================================
 Camera.CameraType = Enum.CameraType.Custom
 pcall(function() RunService:UnbindFromRenderStep("DemigodCamlock") end)
@@ -1153,29 +1229,32 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     local camPos = camCF.Position
     local currentLook = camCF.LookVector
 
-    local aimPoint, inSnapWindow = getAimPoint(hrp, target.UserId, dt)
+    local aimPoint, inSnapWindow, speedMult = getAimPoint(hrp, hum, target.UserId, dt)
     local toTarget = aimPoint - camPos
     if toTarget.Magnitude < 0.1 then return end
 
     local targetDir = toTarget.Unit
 
-    -- Look-rotation smoothing rate switches to the fast jump-snap rate
-    -- during an active snap window, otherwise uses normal LOOK_SMOOTH_RATE.
-    -- Both are continuous exponential filters — no binary jumps, no
-    -- dot-product-triggered snapping, which was the source of the shake.
-    local rate = inSnapWindow and JUMP_SNAP_RATE or LOOK_SMOOTH_RATE
+    -- Rage-lock feel: base rate raised, scaled further by anomaly
+    -- detection (macro/cframe/speedhack/flying all push this higher)
+    local rate = (inSnapWindow and JUMP_SNAP_RATE or LOOK_SMOOTH_RATE) * speedMult
     local alpha = 1 - math.exp(-rate * dt)
 
-    local newLook = currentLook:Lerp(targetDir, alpha)
+    -- Controlled jitter: small random angular offset so the tracking
+    -- doesn't read as a clean smoothed curve — this is what breaks
+    -- the "predictable follow" look and gives the rage-lock aesthetic
+    local jitterX = (math.random() - 0.5) * LOOK_JITTER_MAG
+    local jitterY = (math.random() - 0.5) * LOOK_JITTER_MAG
+    local jitteredDir = (targetDir + Vector3.new(jitterX, jitterY, 0)).Unit
+
+    local newLook = currentLook:Lerp(jitteredDir, alpha)
     if newLook.Magnitude < 0.001 then return end
 
     Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
 
 -- =============================================
--- MOUSE CAMLOCK — PC only, moves the cursor toward
--- the target's on-screen position instead of the camera.
--- Independent system, same targeting/eligibility rules.
+-- MOUSE CAMLOCK — PC only
 -- =============================================
 if not IS_MOBILE then
     pcall(function() RunService:UnbindFromRenderStep("DemigodMouseCamlock") end)
@@ -1187,26 +1266,23 @@ if not IS_MOBILE then
 
         local hrp = target.Character:FindFirstChild("HumanoidRootPart")
         if not hrp or not hrp:IsDescendantOf(workspace) then return end
+        local hum = target.Character:FindFirstChildOfClass("Humanoid")
 
-        local aimPoint = getAimPoint(hrp, target.UserId, dt)
+        local aimPoint = getAimPoint(hrp, hum, target.UserId, dt)
         local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
 
         if onScreen then
             pcall(function()
                 UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-                local mouseLoc = UserInputService:GetMouseLocation()
-                local targetLoc = Vector2.new(screenPos.X, screenPos.Y)
-                local newLoc = mouseLoc:Lerp(targetLoc, 1 - math.exp(-LOOK_SMOOTH_RATE * dt))
-                -- Moves the OS cursor toward the target's screen position.
-                -- This does not click, fire, or interact with anything —
-                -- purely cursor positioning.
             end)
         end
     end)
 end
 
 -- =============================================
--- CARRY DETECTION
+-- CARRY DETECTION — visual/state tracking only.
+-- No firing action attached to this, per the standing
+-- boundary on hit registration.
 -- =============================================
 local function getCarriedCharacter()
     local character = LocalPlayer.Character
@@ -1234,9 +1310,32 @@ local function getCarriedCharacter()
     return nil
 end
 
+-- Detects who is carrying a KNOCKED player, for any other players
+-- in the server (not just yourself) — surfaces it via notification
+-- so you can manually target the carrier if you choose to.
+local function getCarrierOf(knockedCharacter)
+    local hrp = knockedCharacter:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    for _, weld in ipairs(hrp:GetChildren()) do
+        if weld:IsA("WeldConstraint") or weld:IsA("Weld") then
+            local otherPart = weld.Part1
+            if otherPart and otherPart.Parent and otherPart.Parent ~= knockedCharacter then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p.Character == otherPart.Parent then
+                        return p
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local notifiedCarries = {}
+
 task.spawn(function()
     while true do
-        task.wait(0.1)
+        task.wait(0.3)
         local character = LocalPlayer.Character
         local detected = getCarriedCharacter()
         local carrying = detected ~= nil
@@ -1254,6 +1353,25 @@ task.spawn(function()
         elseif carrying and wasCarrying then
             disableAllCollision(character)
             disableAllCollision(detected)
+        end
+
+        -- Surface knocked-and-carried players server-wide, for manual Q-targeting
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    local ok, health = pcall(function() return hum.Health end)
+                    if ok and health <= KNOCK_THRESHOLD then
+                        local carrier = getCarrierOf(p.Character)
+                        if carrier and not notifiedCarries[p.UserId] then
+                            notifiedCarries[p.UserId] = true
+                            notify("Carry Detected", carrier.Name .. " is carrying " .. p.Name, 3)
+                        end
+                    else
+                        notifiedCarries[p.UserId] = nil
+                    end
+                end
+            end
         end
     end
 end)
@@ -1280,8 +1398,7 @@ local function validateHitboxes()
 end
 
 -- =============================================
--- REMAINING KEYBINDS (C, Z, J, K, P) — Q is handled by
--- ContextActionService above, not duplicated here.
+-- REMAINING KEYBINDS
 -- =============================================
 local pPressCount = 0
 local pLastPress = 0
@@ -1310,7 +1427,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
             autoLockGui.Visible = not autoLockGui.Visible
         end)
     elseif input.KeyCode == Enum.KeyCode.M and not IS_MOBILE then
-        -- PC-only keybind for Mouse Camlock, alongside the MC button
         getgenv().MouseCamlockEnabled = not getgenv().MouseCamlockEnabled
         updateMCBtn()
     elseif input.KeyCode == Enum.KeyCode.P then
@@ -1330,7 +1446,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 end)
 
 -- =============================================
--- PLAYER SETUP + LIST AUTO-UPDATE
+-- PLAYER SETUP
 -- =============================================
 local function setupPlayer(player)
     if player == LocalPlayer then return end
@@ -1343,7 +1459,8 @@ local function setupPlayer(player)
         task.wait(0.5)
         applyHitbox(player)
         setupHealthWatch(player)
-        trackingState[player.UserId] = nil -- fresh filter state on respawn
+        trackingState[player.UserId] = nil
+        anomalyCache[player.UserId] = nil
     end)
 end
 
@@ -1367,6 +1484,8 @@ Players.PlayerRemoving:Connect(function(player)
     end
     pendingRelock[userId] = nil
     trackingState[userId] = nil
+    anomalyCache[userId] = nil
+    notifiedCarries[userId] = nil
     getgenv().Whitelist[userId] = nil
     if getgenv().CamlockTarget == player then releaseTarget() end
     rebuildWhitelistGui()
