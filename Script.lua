@@ -67,7 +67,7 @@ local IS_MOBILE = getgenv().ScriptMode == "Mobile"
 -- CORE STATE
 -- =============================================
 getgenv().HitboxSize = Vector3.new(9, 9, 9)
-getgenv().TargetPart = "HumanoidRootPart" -- fallback if part list below is unavailable on a rig
+getgenv().TargetPart = "HumanoidRootPart"
 getgenv().Enabled = true
 getgenv().HitboxVisible = true
 getgenv().WallCheckEnabled = true
@@ -75,16 +75,13 @@ getgenv().Whitelist = getgenv().Whitelist or {}
 getgenv().AutoLockPool = getgenv().AutoLockPool or {}
 getgenv().AutoLockEnabled = false
 getgenv().SafeMode = false
-getgenv().MouseCamlockEnabled = false
 getgenv().MobileMouseLockEnabled = false
+-- MouseCamlockEnabled / MC removed entirely per request
 
--- Expanded target part list per request. Grouped logically; a fresh
--- part is picked per lock-on, falling back to HumanoidRootPart if
--- the named part doesn't exist on that particular rig.
 local TARGET_PART_POOL = {
-    "UpperTorso", "LowerTorso", "Torso",
-    "HumanoidRootPart",
     "Head",
+    "HumanoidRootPart",
+    "UpperTorso", "LowerTorso", "Torso",
     "LeftUpperArm", "LeftLowerArm", "Left Arm",
     "RightUpperArm", "RightLowerArm", "Right Arm",
     "LeftUpperLeg", "LeftLowerLeg", "Left Leg",
@@ -96,15 +93,15 @@ local RELOCK_THRESHOLD = 11
 local LOCAL_HEALTH_GATE = 15
 local MAX_HEALTH = 100
 local TRIPLE_PRESS_WINDOW = 1.0
-local AIM_OFFSET = Vector3.new(0, 0, 0) -- offset no longer needed globally; per-part position used directly
 
 local VELOCITY_SMOOTH_RATE = 8.0
 local LOOK_SMOOTH_RATE = 16.0
 local LOOK_JITTER_MAG = 0.015
 local LEAD_TIME = 0.12
 local JUMP_VEL_THRESHOLD = 18
-local JUMP_SNAP_RATE = 26.0 * 0.95 -- 5% less smooth/instant per request
+local JUMP_SNAP_RATE = 26.0 * 0.95
 local JUMP_SNAP_DURATION = 0.35
+local PART_CYCLE_INTERVAL = 0.4 -- how often the reference part re-rolls during an active lock
 
 local MACRO_SPEED_MULT = 1.15
 local CFRAME_ACCEL_SPIKE = 500
@@ -113,9 +110,6 @@ local FLYING_TRACK_RATE_MULT = 2.1
 local SPEEDHACK_VEL_THRESHOLD = 60
 local FLYING_Y_VEL_THRESHOLD = 25
 
--- "Miss a little" — small chance per second of a brief intentional
--- offset window, simulating imperfect human aim rather than a
--- perfect lock every single time.
 local MISS_CHANCE_PER_SECOND = 0.01
 local MISS_OFFSET_MAG = 0.06
 local MISS_WINDOW_DURATION = 0.15
@@ -133,7 +127,8 @@ local carriedCharacter = nil
 local wasCarrying = false
 local pendingRelock = {}
 local trackingState = {}
-local lockedPartName = {} -- which specific part is currently targeted per userId
+local lockedPartName = {}
+local lastPartCycleTime = {}
 
 local function getTrackingState(userId)
     if not trackingState[userId] then
@@ -225,32 +220,20 @@ local function makeDraggable(frame)
 end
 
 local ORIGINAL_TRANSPARENCY = {
-    cFrame = 0.3, zFrame = 0.3,
-    wlToggleBtn = 0.3, alToggleBtn = 0.3, emoteBtn = 0.15, mcFrame = 0.3, xFrame = 0.3, vFrame = 0.3,
+    xFrame = 0.3, cFrame = 0.3, zFrame = 0.3, emoteBtn = 0.15, vFrame = 0.3,
 }
 
--- Q FRAME/BTN/DOT PERMANENTLY REMOVED — no declarations, no creation, nothing.
-local cFrame, cBtn, cDot, zFrame, zBtn, zDot
+-- X, C, Z all created together in one row this time — same shape, same position logic
+local xFrame, xBtn, xDot, cFrame, cBtn, cDot, zFrame, zBtn, zDot
 local wlToggleBtn, alToggleBtn, emoteBtn
-local mcFrame, mcBtn, mcDot -- PC Mouse Camlock
-local xFrame, xBtn, xDot   -- NEW: rebuilt lock/release button, bound to X
-local vFrame, vBtn, vDot   -- NEW: mobile Mouse Lock button, bound to V (mobile only)
-
--- All buttons anchored top-right, stacked downward, per request
-local TOP_RIGHT_X = 1
-local TOP_RIGHT_Y_START = 10
-local BTN_SIZE = 46
-local BTN_GAP = 6
-
-local function topRightSlot(index)
-    return UDim2.new(TOP_RIGHT_X, -(BTN_SIZE + 10), 0, TOP_RIGHT_Y_START + (index - 1) * (BTN_SIZE + BTN_GAP))
-end
+local vFrame, vBtn, vDot
+-- mcFrame/mcBtn/mcDot fully removed, no declarations at all
 
 if IS_MOBILE then
-    -- X — rebuilt lock/release button (mobile still needs a tappable control)
+    -- X, C, Z — one row, bottom-center, identical shape/spacing
     xFrame = Instance.new("Frame")
-    xFrame.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    xFrame.Position = topRightSlot(1)
+    xFrame.Size = UDim2.new(0, 50, 0, 50)
+    xFrame.Position = UDim2.new(0.5, -80, 1, -120)
     xFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     xFrame.BackgroundTransparency = 0.3
     xFrame.Active = true
@@ -278,8 +261,8 @@ if IS_MOBILE then
     Instance.new("UICorner", xDot).CornerRadius = UDim.new(1, 0)
 
     cFrame = Instance.new("Frame")
-    cFrame.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    cFrame.Position = topRightSlot(2)
+    cFrame.Size = UDim2.new(0, 50, 0, 50)
+    cFrame.Position = UDim2.new(0.5, -25, 1, -120)
     cFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     cFrame.BackgroundTransparency = 0.3
     cFrame.Active = true
@@ -307,8 +290,8 @@ if IS_MOBILE then
     Instance.new("UICorner", cDot).CornerRadius = UDim.new(1, 0)
 
     zFrame = Instance.new("Frame")
-    zFrame.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    zFrame.Position = topRightSlot(3)
+    zFrame.Size = UDim2.new(0, 50, 0, 50)
+    zFrame.Position = UDim2.new(0.5, 30, 1, -120)
     zFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     zFrame.BackgroundTransparency = 0.3
     zFrame.Active = true
@@ -335,44 +318,45 @@ if IS_MOBILE then
     zDot.Parent = zFrame
     Instance.new("UICorner", zDot).CornerRadius = UDim.new(1, 0)
 
+    -- WL, AL, Safe — one row, top-right, pointing right-upward
     wlToggleBtn = Instance.new("TextButton")
-    wlToggleBtn.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    wlToggleBtn.Position = topRightSlot(4)
+    wlToggleBtn.Size = UDim2.new(0, 46, 0, 40)
+    wlToggleBtn.Position = UDim2.new(1, -156, 0, 10)
     wlToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     wlToggleBtn.BackgroundTransparency = 0.3
     wlToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     wlToggleBtn.Text = "WL"
     wlToggleBtn.Font = Enum.Font.GothamBold
-    wlToggleBtn.TextSize = 13
+    wlToggleBtn.TextSize = 14
     wlToggleBtn.Active = true
     wlToggleBtn.ZIndex = 20
     wlToggleBtn.Parent = screenGui
-    Instance.new("UICorner", wlToggleBtn).CornerRadius = UDim.new(1, 0)
+    Instance.new("UICorner", wlToggleBtn).CornerRadius = UDim.new(0, 8)
 
     alToggleBtn = Instance.new("TextButton")
-    alToggleBtn.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    alToggleBtn.Position = topRightSlot(5)
+    alToggleBtn.Size = UDim2.new(0, 46, 0, 40)
+    alToggleBtn.Position = UDim2.new(1, -104, 0, 10)
     alToggleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     alToggleBtn.BackgroundTransparency = 0.3
     alToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     alToggleBtn.Text = "AL"
     alToggleBtn.Font = Enum.Font.GothamBold
-    alToggleBtn.TextSize = 13
+    alToggleBtn.TextSize = 14
     alToggleBtn.Active = true
     alToggleBtn.ZIndex = 20
     alToggleBtn.Parent = screenGui
-    Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(1, 0)
+    Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(0, 8)
 
-    -- V — Mobile Mouse Lock (drives an on-screen reticle instead of an OS cursor)
+    -- V — Mobile Mouse Lock, still top-right cluster, separate row below
     vFrame = Instance.new("Frame")
-    vFrame.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    vFrame.Position = topRightSlot(6)
+    vFrame.Size = UDim2.new(0, 46, 0, 40)
+    vFrame.Position = UDim2.new(1, -52, 0, 10)
     vFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     vFrame.BackgroundTransparency = 0.3
     vFrame.Active = true
     vFrame.ZIndex = 20
     vFrame.Parent = screenGui
-    Instance.new("UICorner", vFrame).CornerRadius = UDim.new(1, 0)
+    Instance.new("UICorner", vFrame).CornerRadius = UDim.new(0, 8)
 
     vBtn = Instance.new("TextButton")
     vBtn.Size = UDim2.new(1, 0, 1, 0)
@@ -380,7 +364,7 @@ if IS_MOBILE then
     vBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     vBtn.Text = "V"
     vBtn.Font = Enum.Font.GothamBold
-    vBtn.TextSize = 22
+    vBtn.TextSize = 18
     vBtn.Active = true
     vBtn.ZIndex = 21
     vBtn.Parent = vFrame
@@ -406,47 +390,44 @@ if IS_MOBILE then
     emoteBtn.ZIndex = 20
     emoteBtn.Parent = screenGui
     Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
-    makeDraggable(emoteBtn) -- kept draggable, only Safe Mode's own draggability was removed
+    makeDraggable(emoteBtn)
 
-    -- Mobile Mouse Lock reticle — visual indicator, moves toward target on screen
-    local mobileReticle = Instance.new("Frame")
-    mobileReticle.Size = UDim2.new(0, 14, 0, 14)
-    mobileReticle.AnchorPoint = Vector2.new(0.5, 0.5)
-    mobileReticle.BackgroundColor3 = Color3.fromRGB(255, 60, 60)
-    mobileReticle.BackgroundTransparency = 1 -- hidden until Mobile Mouse Lock is on
-    mobileReticle.ZIndex = 15
-    mobileReticle.Parent = screenGui
-    Instance.new("UICorner", mobileReticle).CornerRadius = UDim.new(1, 0)
-    getgenv()._mobileReticleRef = mobileReticle
-else
-    mcFrame = Instance.new("Frame")
-    mcFrame.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    mcFrame.Position = topRightSlot(1)
-    mcFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-    mcFrame.BackgroundTransparency = 0.3
-    mcFrame.Active = true
-    mcFrame.ZIndex = 20
-    mcFrame.Parent = screenGui
-    Instance.new("UICorner", mcFrame).CornerRadius = UDim.new(1, 0)
+    -- Thumb-drag visual for Mobile Mouse Lock: a thumb-shaped icon
+    -- that slides from an origin point toward the target's screen
+    -- position, rather than a plain dot snapping there instantly.
+    local thumbOrigin = Instance.new("Frame")
+    thumbOrigin.Size = UDim2.new(0, 70, 0, 70)
+    thumbOrigin.AnchorPoint = Vector2.new(0.5, 0.5)
+    thumbOrigin.Position = UDim2.new(0.2, 0, 0.85, 0) -- roughly where a thumb rests on a touch joystick area
+    thumbOrigin.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    thumbOrigin.BackgroundTransparency = 1
+    thumbOrigin.ZIndex = 15
+    thumbOrigin.Parent = screenGui
+    Instance.new("UICorner", thumbOrigin).CornerRadius = UDim.new(1, 0)
 
-    mcBtn = Instance.new("TextButton")
-    mcBtn.Size = UDim2.new(1, 0, 1, 0)
-    mcBtn.BackgroundTransparency = 1
-    mcBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    mcBtn.Text = "MC"
-    mcBtn.Font = Enum.Font.GothamBold
-    mcBtn.TextSize = 16
-    mcBtn.Active = true
-    mcBtn.ZIndex = 21
-    mcBtn.Parent = mcFrame
+    local thumbIcon = Instance.new("Frame")
+    thumbIcon.Size = UDim2.new(0, 34, 0, 34)
+    thumbIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+    thumbIcon.Position = UDim2.new(0.2, 0, 0.85, 0)
+    thumbIcon.BackgroundColor3 = Color3.fromRGB(240, 240, 245)
+    thumbIcon.BackgroundTransparency = 1
+    thumbIcon.ZIndex = 16
+    thumbIcon.Parent = screenGui
+    Instance.new("UICorner", thumbIcon).CornerRadius = UDim.new(1, 0)
 
-    mcDot = Instance.new("Frame")
-    mcDot.Size = UDim2.new(0, 10, 0, 10)
-    mcDot.Position = UDim2.new(1, -2, 0, -2)
-    mcDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
-    mcDot.ZIndex = 22
-    mcDot.Parent = mcFrame
-    Instance.new("UICorner", mcDot).CornerRadius = UDim.new(1, 0)
+    local thumbShadow = Instance.new("Frame")
+    thumbShadow.Size = UDim2.new(0, 40, 0, 40)
+    thumbShadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    thumbShadow.Position = UDim2.new(0.2, 0, 0.85, 0)
+    thumbShadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    thumbShadow.BackgroundTransparency = 1
+    thumbShadow.ZIndex = 14
+    thumbShadow.Parent = screenGui
+    Instance.new("UICorner", thumbShadow).CornerRadius = UDim.new(1, 0)
+
+    getgenv()._thumbOrigin = thumbOrigin
+    getgenv()._thumbIcon = thumbIcon
+    getgenv()._thumbShadow = thumbShadow
 end
 
 local function fireEmoteMenu()
@@ -497,17 +478,6 @@ local function updateZBtn()
     end
 end
 
-local function updateMCBtn()
-    if IS_MOBILE or not mcFrame then return end
-    if getgenv().MouseCamlockEnabled then
-        mcFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
-        mcDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
-    else
-        mcFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        mcDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
-    end
-end
-
 local function updateVBtn()
     if not IS_MOBILE or not vFrame then return end
     if getgenv().MobileMouseLockEnabled then
@@ -519,14 +489,19 @@ local function updateVBtn()
     end
 end
 
--- Safe Mode — NOT draggable anymore, anchored top-right in the stack
+-- =============================================
+-- SAFE MODE — WL/AL text now correctly included in the
+-- invisibility pass. Bug was: their entries had controls = {}
+-- so the loop never touched their own TextTransparency.
+-- Fix: iterate the buttons themselves too, not just controls.
+-- =============================================
 local safeModeBtn
 local allMobileButtons = {}
 
 if IS_MOBILE then
     safeModeBtn = Instance.new("TextButton")
-    safeModeBtn.Size = UDim2.new(0, BTN_SIZE, 0, BTN_SIZE)
-    safeModeBtn.Position = topRightSlot(7)
+    safeModeBtn.Size = UDim2.new(0, 46, 0, 40)
+    safeModeBtn.Position = UDim2.new(1, -52, 0, 56)
     safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
     safeModeBtn.BackgroundTransparency = 0
     safeModeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -536,14 +511,14 @@ if IS_MOBILE then
     safeModeBtn.Active = true
     safeModeBtn.ZIndex = 200
     safeModeBtn.Parent = screenGui
-    Instance.new("UICorner", safeModeBtn).CornerRadius = UDim.new(1, 0)
-    -- makeDraggable(safeModeBtn) — REMOVED per request, no longer draggable
+    Instance.new("UICorner", safeModeBtn).CornerRadius = UDim.new(0, 8)
 
     table.insert(allMobileButtons, {frame = xFrame, controls = {xBtn, xDot}, key = "xFrame"})
     table.insert(allMobileButtons, {frame = cFrame, controls = {cBtn, cDot}, key = "cFrame"})
     table.insert(allMobileButtons, {frame = zFrame, controls = {zBtn, zDot}, key = "zFrame"})
-    table.insert(allMobileButtons, {frame = wlToggleBtn, controls = {}, key = "wlToggleBtn"})
-    table.insert(allMobileButtons, {frame = alToggleBtn, controls = {}, key = "alToggleBtn"})
+    -- FIX: WL/AL now pass themselves as their own text-bearing control
+    table.insert(allMobileButtons, {frame = wlToggleBtn, controls = {wlToggleBtn}, key = "wlToggleBtn"})
+    table.insert(allMobileButtons, {frame = alToggleBtn, controls = {alToggleBtn}, key = "alToggleBtn"})
     table.insert(allMobileButtons, {frame = vFrame, controls = {vBtn, vDot}, key = "vFrame"})
     if emoteBtn then table.insert(allMobileButtons, {frame = emoteBtn, controls = {}, key = "emoteBtn"}) end
 end
@@ -568,14 +543,18 @@ local function applySafeModeVisual()
         safeModeBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
         safeModeBtn.BackgroundTransparency = 0
         safeModeBtn.TextTransparency = 0
-        -- No position restore needed — it never moves anymore
 
         for _, entry in ipairs(allMobileButtons) do
             entry.frame.BackgroundTransparency = ORIGINAL_TRANSPARENCY[entry.key] or 0.3
             for _, ctrl in ipairs(entry.controls) do
                 if ctrl:IsA("TextButton") then
                     ctrl.TextTransparency = 0
-                    ctrl.BackgroundTransparency = 1
+                    -- WL/AL are self-referential controls (button IS the frame),
+                    -- so don't blank their background here — only X/C/Z's
+                    -- separate inner buttons stay background-transparent
+                    if ctrl ~= entry.frame then
+                        ctrl.BackgroundTransparency = 1
+                    end
                 elseif ctrl:IsA("Frame") then
                     ctrl.BackgroundTransparency = 0
                 end
@@ -615,7 +594,7 @@ if IS_MOBILE then
 end
 
 -- =============================================
--- WHITELIST / AUTO-LOCK GUI (menus unchanged from prior positions)
+-- WHITELIST / AUTO-LOCK MENUS (unchanged positions — left/right)
 -- =============================================
 local whitelistGui = Instance.new("Frame")
 whitelistGui.Size = UDim2.new(0, 220, 0, 300)
@@ -836,20 +815,14 @@ if IS_MOBILE then
     end)
 end
 
-if not IS_MOBILE and mcBtn then
-    mcBtn.MouseButton1Click:Connect(function()
-        getgenv().MouseCamlockEnabled = not getgenv().MouseCamlockEnabled
-        updateMCBtn()
-    end)
-end
-
 if IS_MOBILE and vBtn then
     vBtn.MouseButton1Click:Connect(function()
         getgenv().MobileMouseLockEnabled = not getgenv().MobileMouseLockEnabled
         updateVBtn()
-        if getgenv()._mobileReticleRef then
-            getgenv()._mobileReticleRef.BackgroundTransparency = getgenv().MobileMouseLockEnabled and 0.2 or 1
-        end
+        local visible = getgenv().MobileMouseLockEnabled
+        if getgenv()._thumbOrigin then getgenv()._thumbOrigin.BackgroundTransparency = visible and 0.85 or 1 end
+        if getgenv()._thumbIcon then getgenv()._thumbIcon.BackgroundTransparency = visible and 0.1 or 1 end
+        if getgenv()._thumbShadow then getgenv()._thumbShadow.BackgroundTransparency = visible and 0.7 or 1 end
     end)
 end
 
@@ -1008,9 +981,7 @@ local function hasLineOfSight(targetHRP)
     return workspace:Raycast(origin, direction.Unit * direction.Magnitude, params) == nil
 end
 
--- Picks a valid target part from the pool for this character; falls
--- back to HumanoidRootPart if the rig doesn't have the chosen part.
-local function pickTargetPart(character)
+local function pickRandomTargetPart(character)
     local candidates = {}
     for _, name in ipairs(TARGET_PART_POOL) do
         local part = character:FindFirstChild(name)
@@ -1089,8 +1060,6 @@ local function updateTrackingState(userId, refPart, humanoid, dt)
     local anomaly = detectAnomaly(userId, refPart, humanoid)
     state.anomalyMult = getSpeedMultiplierFor(anomaly)
 
-    -- Miss chance: small probability per second of opening a brief
-    -- offset window, simulating imperfect human aim.
     if tick() > state.missUntil and math.random() < (MISS_CHANCE_PER_SECOND * dt) then
         state.missUntil = tick() + MISS_WINDOW_DURATION
         state.missOffset = Vector3.new(
@@ -1103,15 +1072,17 @@ local function updateTrackingState(userId, refPart, humanoid, dt)
     return state
 end
 
+-- Continuously cycles the reference part while a lock is active,
+-- instead of holding one part for the whole lock duration.
 local function getAimPoint(character, humanoid, userId, dt)
-    -- Re-pick a target part on a new lock only; keep using the same
-    -- part while locked so aim doesn't jump between body parts mid-lock.
-    if not lockedPartName[userId] then
-        local part = pickTargetPart(character)
+    local now = tick()
+    if not lastPartCycleTime[userId] or (now - lastPartCycleTime[userId]) >= PART_CYCLE_INTERVAL then
+        local part = pickRandomTargetPart(character)
         lockedPartName[userId] = part and part.Name or "HumanoidRootPart"
+        lastPartCycleTime[userId] = now
     end
 
-    local refPart = character:FindFirstChild(lockedPartName[userId])
+    local refPart = character:FindFirstChild(lockedPartName[userId] or "HumanoidRootPart")
     if not refPart or not refPart:IsA("BasePart") then
         refPart = character:FindFirstChild("HumanoidRootPart")
         lockedPartName[userId] = "HumanoidRootPart"
@@ -1215,6 +1186,7 @@ local function releaseTarget()
     local target = getgenv().CamlockTarget
     if target then
         lockedPartName[target.UserId] = nil
+        lastPartCycleTime[target.UserId] = nil
     end
     getgenv().CamlockTarget = nil
     updateXBtn(false)
@@ -1230,12 +1202,12 @@ local function handleLockToggle()
             getgenv().CamlockTarget = target
             trackingState[target.UserId] = nil
             lockedPartName[target.UserId] = nil
+            lastPartCycleTime[target.UserId] = nil
             updateXBtn(true)
         end
     end
 end
 
--- X — the rebuilt lock/release action, PC key AND mobile button
 if IS_MOBILE and xBtn then
     xBtn.MouseButton1Click:Connect(function()
         triplePress("x_btn", handleLockToggle)
@@ -1287,6 +1259,7 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
                 if getgenv().CamlockTarget ~= autoTarget then
                     trackingState[autoTarget.UserId] = nil
                     lockedPartName[autoTarget.UserId] = nil
+                    lastPartCycleTime[autoTarget.UserId] = nil
                 end
                 getgenv().CamlockTarget = autoTarget
                 updateXBtn(true)
@@ -1346,36 +1319,7 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
 end)
 
 -- =============================================
--- MOUSE CAMLOCK — PC only (unchanged mechanism)
--- =============================================
-if not IS_MOBILE then
-    pcall(function() RunService:UnbindFromRenderStep("DemigodMouseCamlock") end)
-
-    RunService:BindToRenderStep("DemigodMouseCamlock", Enum.RenderPriority.Camera.Value + 2, function(dt)
-        if not getgenv().MouseCamlockEnabled then return end
-        local target = getgenv().CamlockTarget
-        if not target or not target.Character then return end
-
-        local hrp = target.Character:FindFirstChild("HumanoidRootPart")
-        if not hrp or not hrp:IsDescendantOf(workspace) then return end
-        local hum = target.Character:FindFirstChildOfClass("Humanoid")
-
-        local aimPoint = getAimPoint(target.Character, hum, target.UserId, dt)
-        if not aimPoint then return end
-
-        local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
-        if onScreen then
-            pcall(function()
-                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-            end)
-        end
-    end)
-end
-
--- =============================================
--- MOBILE MOUSE LOCK — V, moves an on-screen reticle
--- toward the target's screen position instead of an
--- OS cursor (mobile has no OS mouse to move).
+-- MOBILE MOUSE LOCK — V, thumb-drag visual toward target
 -- =============================================
 if IS_MOBILE then
     pcall(function() RunService:UnbindFromRenderStep("DemigodMobileMouseLock") end)
@@ -1383,8 +1327,9 @@ if IS_MOBILE then
     RunService:BindToRenderStep("DemigodMobileMouseLock", Enum.RenderPriority.Camera.Value + 2, function(dt)
         if not getgenv().MobileMouseLockEnabled then return end
         local target = getgenv().CamlockTarget
-        local reticle = getgenv()._mobileReticleRef
-        if not target or not target.Character or not reticle then return end
+        local icon = getgenv()._thumbIcon
+        local shadow = getgenv()._thumbShadow
+        if not target or not target.Character or not icon then return end
 
         local hrp = target.Character:FindFirstChild("HumanoidRootPart")
         if not hrp or not hrp:IsDescendantOf(workspace) then return end
@@ -1395,7 +1340,21 @@ if IS_MOBILE then
 
         local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
         if onScreen then
-            reticle.Position = UDim2.new(0, screenPos.X, 0, screenPos.Y)
+            -- Thumb icon slides toward the target's screen position,
+            -- shadow trails slightly behind for a physical drag feel
+            local currentPos = icon.Position
+            local targetUDim = UDim2.new(0, screenPos.X, 0, screenPos.Y)
+            local alpha = 1 - math.exp(-14 * dt)
+
+            local currentX = currentPos.X.Offset
+            local currentY = currentPos.Y.Offset
+            local newX = currentX + (screenPos.X - currentX) * alpha
+            local newY = currentY + (screenPos.Y - currentY) * alpha
+
+            icon.Position = UDim2.new(0, newX, 0, newY)
+            if shadow then
+                shadow.Position = UDim2.new(0, newX + 3, 0, newY + 4)
+            end
         end
     end)
 end
@@ -1514,9 +1473,8 @@ end
 
 -- =============================================
 -- KEYBINDS
--- X replaces Q entirely. "[" moved off LeftBracket to avoid the
--- likely Da Hood/Roblox keymap collision that was eating the toggle.
--- Using RightBracket instead, which is far less commonly bound.
+-- "]" moved to Semicolon — RightBracket was still suspect as a
+-- Da Hood/Roblox default. Semicolon has near-zero collision risk.
 -- =============================================
 local pPressCount = 0
 local pLastPress = 0
@@ -1529,9 +1487,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         triplePress("x_key", handleLockToggle)
     elseif input.KeyCode == Enum.KeyCode.C then
         triplePress("c_key", toggleHitboxVisibility)
-    elseif input.KeyCode == Enum.KeyCode.RightBracket then
-        -- moved from LeftBracket — same action as C, avoids the collision
-        triplePress("bracket_key", toggleHitboxVisibility)
+    elseif input.KeyCode == Enum.KeyCode.Semicolon then
+        triplePress("semicolon_key", toggleHitboxVisibility)
     elseif input.KeyCode == Enum.KeyCode.Z then
         triplePress("z_key", function()
             getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
@@ -1545,9 +1502,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         triplePress("k_key", function()
             autoLockGui.Visible = not autoLockGui.Visible
         end)
-    elseif input.KeyCode == Enum.KeyCode.M and not IS_MOBILE then
-        getgenv().MouseCamlockEnabled = not getgenv().MouseCamlockEnabled
-        updateMCBtn()
     elseif input.KeyCode == Enum.KeyCode.P then
         local now = tick()
         if (now - pLastPress) > TRIPLE_PRESS_WINDOW then
@@ -1581,6 +1535,7 @@ local function setupPlayer(player)
         trackingState[player.UserId] = nil
         anomalyCache[player.UserId] = nil
         lockedPartName[player.UserId] = nil
+        lastPartCycleTime[player.UserId] = nil
     end)
 end
 
@@ -1606,6 +1561,7 @@ Players.PlayerRemoving:Connect(function(player)
     trackingState[userId] = nil
     anomalyCache[userId] = nil
     lockedPartName[userId] = nil
+    lastPartCycleTime[userId] = nil
     notifiedCarries[userId] = nil
     getgenv().Whitelist[userId] = nil
     if getgenv().CamlockTarget == player then releaseTarget() end
@@ -1625,7 +1581,6 @@ rebuildAutoLockGui()
 updateXBtn(false)
 updateCBtn()
 updateZBtn()
-updateMCBtn()
 updateVBtn()
-notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | X: Lock | M: Mouse Camlock (PC) | V: Mouse Lock (Mobile) | C or ]: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
+notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | X: Lock | V: Mouse Lock | C or ;: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
 print("Demigod script loaded — Mode: " .. getgenv().ScriptMode)
