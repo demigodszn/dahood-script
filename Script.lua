@@ -2,7 +2,7 @@
 -- MODE SELECTION — must run first
 -- =============================================
 getgenv().CamlockTarget = nil
-getgenv().ScriptMode = getgenv().ScriptMode or nil
+getgenv().ScriptMode = nil  -- always re-prompt; getgenv() persistence was causing stale "PC" mode
 
 if not getgenv().ScriptMode then
     local StarterGui = game:GetService("StarterGui")
@@ -147,6 +147,7 @@ local lastPartCycleTime = {}    -- tick() when cycle last advanced
 local partCycleIndex = {}       -- which index in CYCLE_PART_POOL we're currently on
 local prevLockedPartName = {}   -- part name we're blending away from
 local partTransitionStart = {}  -- tick() when the current blend started
+local originalPartSizes = {}    -- [userId] = Vector3: actual in-game TargetPart size before we expand it
 
 local function getTrackingState(userId)
     if not trackingState[userId] then
@@ -265,7 +266,7 @@ if IS_MOBILE then
     xBtn.Size = UDim2.new(1, 0, 1, 0)
     xBtn.BackgroundTransparency = 1
     xBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    xBtn.Text = "X"
+    xBtn.Text = "C"
     xBtn.Font = Enum.Font.GothamBold
     xBtn.TextSize = 22
     xBtn.Active = true
@@ -294,7 +295,7 @@ if IS_MOBILE then
     cBtn.Size = UDim2.new(1, 0, 1, 0)
     cBtn.BackgroundTransparency = 1
     cBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    cBtn.Text = "C"
+    cBtn.Text = "V"
     cBtn.Font = Enum.Font.GothamBold
     cBtn.TextSize = 22
     cBtn.Active = true
@@ -396,14 +397,14 @@ local function fireEmoteMenu()
     end)
 end
 
-if IS_MOBILE and emoteBtn then
+if emoteBtn then
     emoteBtn.MouseButton1Click:Connect(function()
         triplePress("emote", fireEmoteMenu)
     end)
 end
 
 local function updateXBtn(locked)
-    if not IS_MOBILE then return end
+    if not xFrame then return end
     if locked then
         xFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
         xDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
@@ -414,7 +415,7 @@ local function updateXBtn(locked)
 end
 
 local function updateCBtn()
-    if not IS_MOBILE then return end
+    if not cFrame then return end
     if getgenv().HitboxVisible then
         cFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
         cDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
@@ -425,7 +426,7 @@ local function updateCBtn()
 end
 
 local function updateZBtn()
-    if not IS_MOBILE then return end
+    if not zFrame then return end
     if getgenv().WallCheckEnabled then
         zFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
         zDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
@@ -744,7 +745,7 @@ alEnableBtn.MouseButton1Click:Connect(function()
     end)
 end)
 
-if IS_MOBILE then
+if wlToggleBtn then
     wlToggleBtn.MouseButton1Click:Connect(function()
         triplePress("wl_toggle", function()
             whitelistGui.Visible = not whitelistGui.Visible
@@ -811,12 +812,18 @@ local function applyHitbox(player)
     local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
     if not targetPart or not targetPart:IsA("BasePart") then return end
 
+    -- Capture the ACTUAL in-game size before we touch it, so ] can restore
+    -- to the real game value instead of a hardcoded guess.
+    local userId = player.UserId
+    if not originalPartSizes[userId] then
+        originalPartSizes[userId] = targetPart.Size
+    end
+
     targetPart.Size = getgenv().HitboxSize
     targetPart.Transparency = getgenv().HitboxVisible and 0.5 or 1
     targetPart.CanCollide = false
     disableAllCollision(player.Character)
 
-    local userId = player.UserId
     if connections[userId] then
         for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
     end
@@ -865,9 +872,9 @@ local function toggleHitboxVisibility()
     updateCBtn()
 end
 
-if IS_MOBILE then
+if cBtn then
     cBtn.MouseButton1Click:Connect(function()
-        triplePress("c_btn", toggleHitboxVisibility)
+        triplePress("v_btn", toggleHitboxVisibility)
     end)
 end
 
@@ -881,44 +888,30 @@ end
 -- =============================================
 getgenv().OriginalHitboxActive = false
 
--- Original R16 part sizes as Roblox ships them
-local ORIGINAL_PART_SIZES = {
-    HumanoidRootPart  = Vector3.new(2, 2, 1),
-    Head              = Vector3.new(2, 1, 1),
-    UpperTorso        = Vector3.new(2, 1.5, 1),
-    LowerTorso        = Vector3.new(2, 1.5, 1),
-    LeftUpperArm      = Vector3.new(1, 1.5, 1),
-    LeftLowerArm      = Vector3.new(1, 1.25, 1),
-    LeftHand          = Vector3.new(1, 0.8, 1),
-    RightUpperArm     = Vector3.new(1, 1.5, 1),
-    RightLowerArm     = Vector3.new(1, 1.25, 1),
-    RightHand         = Vector3.new(1, 0.8, 1),
-    LeftUpperLeg      = Vector3.new(1, 1.5, 1),
-    LeftLowerLeg      = Vector3.new(1, 1.5, 1),
-    LeftFoot          = Vector3.new(1, 0.5, 1),
-    RightUpperLeg     = Vector3.new(1, 1.5, 1),
-    RightLowerLeg     = Vector3.new(1, 1.5, 1),
-    RightFoot         = Vector3.new(1, 0.5, 1),
-}
+-- ORIGINAL_PART_SIZES removed — restoreOriginalHitboxes now uses
+-- originalPartSizes[userId] captured from the real game before expansion.
 
 local bracketBtn  -- mobile-only, declared here for updateBracketBtn scope
 
 local function restoreOriginalHitboxes()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
-            -- Disconnect size-lock connections so they don't fight the restore
             local userId = player.UserId
+            -- Disconnect size-lock watchers so they don't fight the restore
             if connections[userId] then
                 for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
                 connections[userId] = {}
             end
-            for partName, origSize in pairs(ORIGINAL_PART_SIZES) do
-                local part = player.Character:FindFirstChild(partName)
-                if part and part:IsA("BasePart") then
-                    part.Size = origSize
-                    part.CanCollide = true
-                end
+            local targetPart = player.Character:FindFirstChild(getgenv().TargetPart)
+            if targetPart and targetPart:IsA("BasePart") then
+                -- Restore to the actual captured in-game size, not a hardcoded value
+                local origSize = originalPartSizes[userId] or Vector3.new(2, 2, 1)
+                targetPart.Size        = origSize
+                targetPart.CanCollide  = true
+                targetPart.Transparency = 1
             end
+            -- Re-enable collision on all other parts that disableAllCollision zeroed out
+            restoreCollision(player.Character)
         end
     end
 end
@@ -974,17 +967,8 @@ if IS_MOBILE then
     local bracketPressCount = 0
     local bracketLastPress  = 0
     bracketBtn.MouseButton1Click:Connect(function()
-        local now = tick()
-        if (now - bracketLastPress) > TRIPLE_PRESS_WINDOW then
-            bracketPressCount = 1
-        else
-            bracketPressCount = bracketPressCount + 1
-        end
-        bracketLastPress = now
-        if bracketPressCount >= 3 then
-            bracketPressCount = 0
-            toggleOriginalHitbox()
-        end
+        -- Single press — ] is a toggle, not a safety gate
+        toggleOriginalHitbox()
     end)
 end
 
@@ -1288,25 +1272,25 @@ local function handleLockToggle()
         if target and target ~= LocalPlayer then
             getgenv().CamlockTarget = target
             local uid = target.UserId
-            trackingState[uid]      = nil
-            lockedPartName[uid]     = nil
-            lastPartCycleTime[uid]  = nil
-            partCycleIndex[uid]     = nil
-            prevLockedPartName[uid] = nil
+            trackingState[uid]       = nil
+            lockedPartName[uid]      = nil
+            lastPartCycleTime[uid]   = nil
+            -- partCycleIndex persists — cycle continues from wherever it was,
+            -- guaranteeing a different starting part on every re-lock
+            prevLockedPartName[uid]  = nil  -- clear blend state for clean transition
             partTransitionStart[uid] = nil
             updateXBtn(true)
         end
     end
 end
 
-if IS_MOBILE and xBtn then
+if xBtn then
     xBtn.MouseButton1Click:Connect(function()
-        -- Isolated actionId — never shares state with x_key_pc.
-        -- After a successful toggle the tracker entry is cleared so the
-        -- next press always starts from count=1 (no permanent throttle).
-        triplePress("x_btn_mobile", function()
+        -- Isolated actionId — never shares state with c_key_pc.
+        -- Tracker entry cleared on success so no permanent throttle across lock/unlock cycles.
+        triplePress("c_btn_mobile", function()
             handleLockToggle()
-            pressTracker["x_btn_mobile"] = nil
+            pressTracker["c_btn_mobile"] = nil
         end)
     end)
 end
@@ -1358,7 +1342,7 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
                     trackingState[uid]       = nil
                     lockedPartName[uid]      = nil
                     lastPartCycleTime[uid]   = nil
-                    partCycleIndex[uid]      = nil
+                    -- partCycleIndex persists — different starting part on every target switch
                     prevLockedPartName[uid]  = nil
                     partTransitionStart[uid] = nil
                 end
@@ -1550,6 +1534,9 @@ end)
 -- VALIDATION
 -- =============================================
 local function validateHitboxes()
+    -- When ] is active, original hitboxes are intentionally restored.
+    -- Don't fight it — skip the whole pass.
+    if getgenv().OriginalHitboxActive then return end
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character and not getgenv().Whitelist[player.UserId] then
             local hum = player.Character:FindFirstChildOfClass("Humanoid")
@@ -1579,17 +1566,16 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if isTyping() then return end
 
-    if input.KeyCode == Enum.KeyCode.X then
-        -- PC only — isolated actionId prevents mobile xBtn presses from
-        -- corrupting this counter (shared "x_key"/"x_btn" was the bug)
-        triplePress("x_key_pc", handleLockToggle)
-    elseif input.KeyCode == Enum.KeyCode.C then
-        triplePress("c_key", toggleHitboxVisibility)
+    if input.KeyCode == Enum.KeyCode.C then
+        -- PC camlock toggle — C key, isolated from mobile c_btn_mobile
+        triplePress("c_key_pc", handleLockToggle)
+    elseif input.KeyCode == Enum.KeyCode.V then
+        triplePress("v_key", toggleHitboxVisibility)
     elseif input.KeyCode == Enum.KeyCode.Semicolon then
         triplePress("semicolon_key", toggleHitboxVisibility)
     elseif input.KeyCode == Enum.KeyCode.RightBracket then
-        -- ] — swap to real game hitbox sizes (no expander). Re-press to restore expanded.
-        triplePress("bracket_key", toggleOriginalHitbox)
+        -- ] — single press toggle: real game hitbox ↔ expanded hitbox
+        toggleOriginalHitbox()
     elseif input.KeyCode == Enum.KeyCode.M then
         -- M — PC only. Toggle Mouse Camlock. Left-click then acquires target under cursor.
         if not IS_MOBILE then
@@ -1649,6 +1635,7 @@ local function setupPlayer(player)
         partCycleIndex[uid]      = nil
         prevLockedPartName[uid]  = nil
         partTransitionStart[uid] = nil
+        originalPartSizes[uid]   = nil  -- re-capture actual size on next applyHitbox
     end)
 end
 
@@ -1678,6 +1665,7 @@ Players.PlayerRemoving:Connect(function(player)
     partCycleIndex[userId]      = nil
     prevLockedPartName[userId]  = nil
     partTransitionStart[userId] = nil
+    originalPartSizes[userId]   = nil
     notifiedCarries[userId] = nil
     getgenv().Whitelist[userId] = nil
     if getgenv().CamlockTarget == player then releaseTarget() end
@@ -1698,5 +1686,5 @@ updateXBtn(false)
 updateCBtn()
 updateZBtn()
 updateBracketBtn()
-notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | X: Lock | C or ;: Hitbox Vis | Z: Wall | ]: Original Hitbox | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
+notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | C: Lock | V: Hitbox Vis | Z: Wall | ]: Expander OFF | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
 print("Demigod script loaded — Mode: " .. getgenv().ScriptMode)
