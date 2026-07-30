@@ -75,17 +75,31 @@ getgenv().Whitelist = getgenv().Whitelist or {}
 getgenv().AutoLockPool = getgenv().AutoLockPool or {}
 getgenv().AutoLockEnabled = false
 getgenv().SafeMode = false
-getgenv().MobileMouseLockEnabled = false
--- MouseCamlockEnabled / MC removed entirely per request
+-- MobileMouseLockEnabled removed — mobile mouse lock excised entirely
+-- MC (Mouse Camlock) — PC only. M key toggles. Left-click acquires target under cursor.
+getgenv().MouseCamlockEnabled = false
 
-local TARGET_PART_POOL = {
+-- Ordered R16 body-scan sequence — anatomically adjacent entries so
+-- every transition is a short spatial hop, never a full-body teleport.
+-- Pattern: head → left arm sweep down → center torso → right arm sweep up →
+--          left leg sweep down → right leg sweep up → back to head.
+local CYCLE_PART_POOL = {
     "Head",
+    "UpperTorso",
+    "LeftUpperArm",
+    "LeftLowerArm",
+    "LeftHand",
+    "LowerTorso",
     "HumanoidRootPart",
-    "UpperTorso", "LowerTorso", "Torso",
-    "LeftUpperArm", "LeftLowerArm", "Left Arm",
-    "RightUpperArm", "RightLowerArm", "Right Arm",
-    "LeftUpperLeg", "LeftLowerLeg", "Left Leg",
-    "RightUpperLeg", "RightLowerLeg", "Right Leg",
+    "RightHand",
+    "RightLowerArm",
+    "RightUpperArm",
+    "LeftUpperLeg",
+    "LeftLowerLeg",
+    "LeftFoot",
+    "RightFoot",
+    "RightLowerLeg",
+    "RightUpperLeg",
 }
 
 local KNOCK_THRESHOLD = 2
@@ -101,7 +115,8 @@ local LEAD_TIME = 0.12
 local JUMP_VEL_THRESHOLD = 18
 local JUMP_SNAP_RATE = 26.0 * 0.95
 local JUMP_SNAP_DURATION = 0.35
-local PART_CYCLE_INTERVAL = 0.4 -- how often the reference part re-rolls during an active lock
+local PART_CYCLE_INTERVAL      = 0.35  -- time per part in the body-scan cycle (16 parts → ~5.6s full loop)
+local PART_TRANSITION_DURATION = 0.12  -- smoothstep blend duration between consecutive parts
 
 local MACRO_SPEED_MULT = 1.15
 local CFRAME_ACCEL_SPIKE = 500
@@ -127,8 +142,11 @@ local carriedCharacter = nil
 local wasCarrying = false
 local pendingRelock = {}
 local trackingState = {}
-local lockedPartName = {}
-local lastPartCycleTime = {}
+local lockedPartName = {}       -- current part name in the cycle
+local lastPartCycleTime = {}    -- tick() when cycle last advanced
+local partCycleIndex = {}       -- which index in CYCLE_PART_POOL we're currently on
+local prevLockedPartName = {}   -- part name we're blending away from
+local partTransitionStart = {}  -- tick() when the current blend started
 
 local function getTrackingState(userId)
     if not trackingState[userId] then
@@ -220,13 +238,15 @@ local function makeDraggable(frame)
 end
 
 local ORIGINAL_TRANSPARENCY = {
-    xFrame = 0.3, cFrame = 0.3, zFrame = 0.3, emoteBtn = 0.15, vFrame = 0.3,
+    xFrame = 0.3, cFrame = 0.3, zFrame = 0.3, emoteBtn = 0.15,
+    -- vFrame removed — mobile mouse lock excised
+    bracketBtn = 0,  -- bracketBtn is fully opaque (BackgroundTransparency = 0); 0.3 was wrong
 }
 
 -- X, C, Z all created together in one row this time — same shape, same position logic
 local xFrame, xBtn, xDot, cFrame, cBtn, cDot, zFrame, zBtn, zDot
 local wlToggleBtn, alToggleBtn, emoteBtn
-local vFrame, vBtn, vDot
+-- vFrame/vBtn/vDot removed — mobile mouse lock excised entirely
 -- mcFrame/mcBtn/mcDot fully removed, no declarations at all
 
 if IS_MOBILE then
@@ -347,35 +367,7 @@ if IS_MOBILE then
     alToggleBtn.Parent = screenGui
     Instance.new("UICorner", alToggleBtn).CornerRadius = UDim.new(0, 8)
 
-    -- V — Mobile Mouse Lock, still top-right cluster, separate row below
-    vFrame = Instance.new("Frame")
-    vFrame.Size = UDim2.new(0, 46, 0, 40)
-    vFrame.Position = UDim2.new(1, -52, 0, 10)
-    vFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-    vFrame.BackgroundTransparency = 0.3
-    vFrame.Active = true
-    vFrame.ZIndex = 20
-    vFrame.Parent = screenGui
-    Instance.new("UICorner", vFrame).CornerRadius = UDim.new(0, 8)
-
-    vBtn = Instance.new("TextButton")
-    vBtn.Size = UDim2.new(1, 0, 1, 0)
-    vBtn.BackgroundTransparency = 1
-    vBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    vBtn.Text = "V"
-    vBtn.Font = Enum.Font.GothamBold
-    vBtn.TextSize = 18
-    vBtn.Active = true
-    vBtn.ZIndex = 21
-    vBtn.Parent = vFrame
-
-    vDot = Instance.new("Frame")
-    vDot.Size = UDim2.new(0, 10, 0, 10)
-    vDot.Position = UDim2.new(1, -2, 0, -2)
-    vDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
-    vDot.ZIndex = 22
-    vDot.Parent = vFrame
-    Instance.new("UICorner", vDot).CornerRadius = UDim.new(1, 0)
+    -- V button removed — mobile mouse lock excised entirely per request
 
     emoteBtn = Instance.new("TextButton")
     emoteBtn.Size = UDim2.new(0, 56, 0, 56)
@@ -392,42 +384,7 @@ if IS_MOBILE then
     Instance.new("UICorner", emoteBtn).CornerRadius = UDim.new(1, 0)
     makeDraggable(emoteBtn)
 
-    -- Thumb-drag visual for Mobile Mouse Lock: a thumb-shaped icon
-    -- that slides from an origin point toward the target's screen
-    -- position, rather than a plain dot snapping there instantly.
-    local thumbOrigin = Instance.new("Frame")
-    thumbOrigin.Size = UDim2.new(0, 70, 0, 70)
-    thumbOrigin.AnchorPoint = Vector2.new(0.5, 0.5)
-    thumbOrigin.Position = UDim2.new(0.2, 0, 0.85, 0) -- roughly where a thumb rests on a touch joystick area
-    thumbOrigin.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    thumbOrigin.BackgroundTransparency = 1
-    thumbOrigin.ZIndex = 15
-    thumbOrigin.Parent = screenGui
-    Instance.new("UICorner", thumbOrigin).CornerRadius = UDim.new(1, 0)
-
-    local thumbIcon = Instance.new("Frame")
-    thumbIcon.Size = UDim2.new(0, 34, 0, 34)
-    thumbIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-    thumbIcon.Position = UDim2.new(0.2, 0, 0.85, 0)
-    thumbIcon.BackgroundColor3 = Color3.fromRGB(240, 240, 245)
-    thumbIcon.BackgroundTransparency = 1
-    thumbIcon.ZIndex = 16
-    thumbIcon.Parent = screenGui
-    Instance.new("UICorner", thumbIcon).CornerRadius = UDim.new(1, 0)
-
-    local thumbShadow = Instance.new("Frame")
-    thumbShadow.Size = UDim2.new(0, 40, 0, 40)
-    thumbShadow.AnchorPoint = Vector2.new(0.5, 0.5)
-    thumbShadow.Position = UDim2.new(0.2, 0, 0.85, 0)
-    thumbShadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    thumbShadow.BackgroundTransparency = 1
-    thumbShadow.ZIndex = 14
-    thumbShadow.Parent = screenGui
-    Instance.new("UICorner", thumbShadow).CornerRadius = UDim.new(1, 0)
-
-    getgenv()._thumbOrigin = thumbOrigin
-    getgenv()._thumbIcon = thumbIcon
-    getgenv()._thumbShadow = thumbShadow
+    -- Thumb-drag visuals removed — mobile mouse lock excised entirely
 end
 
 local function fireEmoteMenu()
@@ -478,16 +435,7 @@ local function updateZBtn()
     end
 end
 
-local function updateVBtn()
-    if not IS_MOBILE or not vFrame then return end
-    if getgenv().MobileMouseLockEnabled then
-        vFrame.BackgroundColor3 = Color3.fromRGB(10, 35, 10)
-        vDot.BackgroundColor3 = Color3.fromRGB(80, 255, 100)
-    else
-        vFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        vDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
-    end
-end
+-- updateVBtn removed — mobile mouse lock excised entirely
 
 -- =============================================
 -- SAFE MODE — WL/AL text now correctly included in the
@@ -519,7 +467,7 @@ if IS_MOBILE then
     -- FIX: WL/AL now pass themselves as their own text-bearing control
     table.insert(allMobileButtons, {frame = wlToggleBtn, controls = {wlToggleBtn}, key = "wlToggleBtn"})
     table.insert(allMobileButtons, {frame = alToggleBtn, controls = {alToggleBtn}, key = "alToggleBtn"})
-    table.insert(allMobileButtons, {frame = vFrame, controls = {vBtn, vDot}, key = "vFrame"})
+    -- vFrame entry removed — mobile mouse lock excised
     if emoteBtn then table.insert(allMobileButtons, {frame = emoteBtn, controls = {}, key = "emoteBtn"}) end
 end
 
@@ -564,7 +512,7 @@ local function applySafeModeVisual()
         updateXBtn(getgenv().CamlockTarget ~= nil)
         updateCBtn()
         updateZBtn()
-        updateVBtn()
+        updateBracketBtn()
     end
 end
 
@@ -815,16 +763,7 @@ if IS_MOBILE then
     end)
 end
 
-if IS_MOBILE and vBtn then
-    vBtn.MouseButton1Click:Connect(function()
-        getgenv().MobileMouseLockEnabled = not getgenv().MobileMouseLockEnabled
-        updateVBtn()
-        local visible = getgenv().MobileMouseLockEnabled
-        if getgenv()._thumbOrigin then getgenv()._thumbOrigin.BackgroundTransparency = visible and 0.85 or 1 end
-        if getgenv()._thumbIcon then getgenv()._thumbIcon.BackgroundTransparency = visible and 0.1 or 1 end
-        if getgenv()._thumbShadow then getgenv()._thumbShadow.BackgroundTransparency = visible and 0.7 or 1 end
-    end)
-end
+-- vBtn click handler removed — mobile mouse lock excised entirely
 
 -- =============================================
 -- HITBOX FUNCTIONS
@@ -933,6 +872,123 @@ if IS_MOBILE then
 end
 
 -- =============================================
+-- ] KEYBIND — ORIGINAL HITBOX TOGGLE
+-- Swaps hitbox expander OFF: restores real game part sizes and
+-- CanCollide=true so the character behaves exactly as the real game
+-- intended. Does NOT touch Transparency — visibility state is untouched.
+-- Re-press ] to bring the expanded hitbox back.
+-- Mobile: bracketBtn sits next to Safe button.
+-- =============================================
+getgenv().OriginalHitboxActive = false
+
+-- Original R16 part sizes as Roblox ships them
+local ORIGINAL_PART_SIZES = {
+    HumanoidRootPart  = Vector3.new(2, 2, 1),
+    Head              = Vector3.new(2, 1, 1),
+    UpperTorso        = Vector3.new(2, 1.5, 1),
+    LowerTorso        = Vector3.new(2, 1.5, 1),
+    LeftUpperArm      = Vector3.new(1, 1.5, 1),
+    LeftLowerArm      = Vector3.new(1, 1.25, 1),
+    LeftHand          = Vector3.new(1, 0.8, 1),
+    RightUpperArm     = Vector3.new(1, 1.5, 1),
+    RightLowerArm     = Vector3.new(1, 1.25, 1),
+    RightHand         = Vector3.new(1, 0.8, 1),
+    LeftUpperLeg      = Vector3.new(1, 1.5, 1),
+    LeftLowerLeg      = Vector3.new(1, 1.5, 1),
+    LeftFoot          = Vector3.new(1, 0.5, 1),
+    RightUpperLeg     = Vector3.new(1, 1.5, 1),
+    RightLowerLeg     = Vector3.new(1, 1.5, 1),
+    RightFoot         = Vector3.new(1, 0.5, 1),
+}
+
+local bracketBtn  -- mobile-only, declared here for updateBracketBtn scope
+
+local function restoreOriginalHitboxes()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            -- Disconnect size-lock connections so they don't fight the restore
+            local userId = player.UserId
+            if connections[userId] then
+                for _, conn in ipairs(connections[userId]) do conn:Disconnect() end
+                connections[userId] = {}
+            end
+            for partName, origSize in pairs(ORIGINAL_PART_SIZES) do
+                local part = player.Character:FindFirstChild(partName)
+                if part and part:IsA("BasePart") then
+                    part.Size = origSize
+                    part.CanCollide = true
+                end
+            end
+        end
+    end
+end
+
+local function reapplyExpandedHitboxes()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            applyHitbox(player)
+        end
+    end
+end
+
+local function updateBracketBtn()
+    if not IS_MOBILE or not bracketBtn then return end
+    if getgenv().OriginalHitboxActive then
+        bracketBtn.BackgroundColor3 = Color3.fromRGB(180, 120, 10)
+        bracketBtn.TextColor3 = Color3.fromRGB(255, 230, 120)
+    else
+        bracketBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        bracketBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end
+end
+
+local function toggleOriginalHitbox()
+    getgenv().OriginalHitboxActive = not getgenv().OriginalHitboxActive
+    if getgenv().OriginalHitboxActive then
+        restoreOriginalHitboxes()
+    else
+        reapplyExpandedHitboxes()
+    end
+    updateBracketBtn()
+end
+
+-- Mobile ] button — sits immediately to the left of Safe button
+if IS_MOBILE then
+    bracketBtn = Instance.new("TextButton")
+    bracketBtn.Size = UDim2.new(0, 46, 0, 40)
+    -- Safe is at (1, -52, 0, 56); bracket sits one slot left at (1, -104, 0, 56)
+    bracketBtn.Position = UDim2.new(1, -104, 0, 56)
+    bracketBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    bracketBtn.BackgroundTransparency = 0
+    bracketBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bracketBtn.Text = "]"
+    bracketBtn.Font = Enum.Font.GothamBold
+    bracketBtn.TextSize = 16
+    bracketBtn.Active = true
+    bracketBtn.ZIndex = 200
+    bracketBtn.Parent = screenGui
+    Instance.new("UICorner", bracketBtn).CornerRadius = UDim.new(0, 8)
+
+    table.insert(allMobileButtons, {frame = bracketBtn, controls = {bracketBtn}, key = "bracketBtn"})
+
+    local bracketPressCount = 0
+    local bracketLastPress  = 0
+    bracketBtn.MouseButton1Click:Connect(function()
+        local now = tick()
+        if (now - bracketLastPress) > TRIPLE_PRESS_WINDOW then
+            bracketPressCount = 1
+        else
+            bracketPressCount = bracketPressCount + 1
+        end
+        bracketLastPress = now
+        if bracketPressCount >= 3 then
+            bracketPressCount = 0
+            toggleOriginalHitbox()
+        end
+    end)
+end
+
+-- =============================================
 -- TARGETING CORE
 -- =============================================
 local function isKnockedOrDead(player)
@@ -981,19 +1037,7 @@ local function hasLineOfSight(targetHRP)
     return workspace:Raycast(origin, direction.Unit * direction.Magnitude, params) == nil
 end
 
-local function pickRandomTargetPart(character)
-    local candidates = {}
-    for _, name in ipairs(TARGET_PART_POOL) do
-        local part = character:FindFirstChild(name)
-        if part and part:IsA("BasePart") then
-            table.insert(candidates, part)
-        end
-    end
-    if #candidates == 0 then
-        return character:FindFirstChild("HumanoidRootPart")
-    end
-    return candidates[math.random(1, #candidates)]
-end
+-- pickRandomTargetPart removed — replaced by sequential cycle in getAimPoint
 
 local anomalyCache = {}
 
@@ -1072,36 +1116,75 @@ local function updateTrackingState(userId, refPart, humanoid, dt)
     return state
 end
 
--- Continuously cycles the reference part while a lock is active,
--- instead of holding one part for the whole lock duration.
+-- Sequential body-scan: advances through CYCLE_PART_POOL in order every
+-- PART_CYCLE_INTERVAL seconds. During the first PART_TRANSITION_DURATION
+-- of each interval the aim point smoothstep-blends from the previous part
+-- to the new one, so every "snap" is actually an S-curve glide.
 local function getAimPoint(character, humanoid, userId, dt)
     local now = tick()
+    local poolSize = #CYCLE_PART_POOL
+
+    -- Advance cycle index when the current interval expires
     if not lastPartCycleTime[userId] or (now - lastPartCycleTime[userId]) >= PART_CYCLE_INTERVAL then
-        local part = pickRandomTargetPart(character)
-        lockedPartName[userId] = part and part.Name or "HumanoidRootPart"
-        lastPartCycleTime[userId] = now
+        local prevIdx  = partCycleIndex[userId] or 0
+        -- Skip parts the character doesn't have (some R16 rigs drop extremities)
+        local nextIdx  = prevIdx
+        local attempts = 0
+        repeat
+            nextIdx  = (nextIdx % poolSize) + 1
+            attempts = attempts + 1
+        until character:FindFirstChild(CYCLE_PART_POOL[nextIdx]) or attempts > poolSize
+
+        prevLockedPartName[userId]  = lockedPartName[userId]
+        partCycleIndex[userId]      = nextIdx
+        lockedPartName[userId]      = CYCLE_PART_POOL[nextIdx]
+        partTransitionStart[userId] = now
+        lastPartCycleTime[userId]   = now
     end
 
-    local refPart = character:FindFirstChild(lockedPartName[userId] or "HumanoidRootPart")
-    if not refPart or not refPart:IsA("BasePart") then
-        refPart = character:FindFirstChild("HumanoidRootPart")
+    -- Resolve current part, fall back to HRP on failure
+    local curPart = character:FindFirstChild(lockedPartName[userId] or "HumanoidRootPart")
+    if not curPart or not curPart:IsA("BasePart") then
+        curPart = character:FindFirstChild("HumanoidRootPart")
         lockedPartName[userId] = "HumanoidRootPart"
     end
-    if not refPart then return nil end
+    if not curPart then return nil end
 
-    local state = updateTrackingState(userId, refPart, humanoid, dt)
+    local state    = updateTrackingState(userId, curPart, humanoid, dt)
     local leadTime = LEAD_TIME * (state.anomalyMult > 1.0 and state.anomalyMult or 1.0) * 0.6
         + (state.anomalyMult == MACRO_SPEED_MULT and LEAD_TIME * 0.2 or 0)
 
-    local leadPos = refPart.Position + (state.smoothedVelocity * leadTime)
+    local curPos = curPart.Position + (state.smoothedVelocity * leadTime)
 
-    local inMissWindow = tick() < state.missUntil
-    if inMissWindow then
-        leadPos = leadPos + state.missOffset
+    local now2        = tick()
+    local inSnapWindow = now2 < state.jumpSnapUntil
+
+    -- Smoothstep S-curve blend from previous part position during transition window.
+    -- rawAlpha 0→1 over PART_TRANSITION_DURATION; smoothstep gives an ease-in-out curve.
+    -- BYPASSED when inSnapWindow — the blend dampens the snap if left active,
+    -- so we pass the raw aim point straight through and let JUMP_SNAP_RATE handle it.
+    if not inSnapWindow then
+        local transAge   = now2 - (partTransitionStart[userId] or now2)
+        local rawAlpha   = math.min(transAge / PART_TRANSITION_DURATION, 1.0)
+        local blendAlpha = rawAlpha * rawAlpha * (3.0 - 2.0 * rawAlpha)  -- smoothstep
+
+        if blendAlpha < 1.0 then
+            local prevName = prevLockedPartName[userId]
+            if prevName then
+                local prevPart = character:FindFirstChild(prevName)
+                if prevPart and prevPart:IsA("BasePart") then
+                    local prevPos = prevPart.Position + (state.smoothedVelocity * leadTime)
+                    curPos = prevPos:Lerp(curPos, blendAlpha)
+                end
+            end
+        end
     end
 
-    local inSnapWindow = tick() < state.jumpSnapUntil
-    return leadPos, inSnapWindow, state.anomalyMult
+    if now2 < state.missUntil then
+        curPos = curPos + state.missOffset
+    end
+
+    return curPos, inSnapWindow, state.anomalyMult
 end
 
 local function getPlayerInCrosshair()
@@ -1185,8 +1268,12 @@ end
 local function releaseTarget()
     local target = getgenv().CamlockTarget
     if target then
-        lockedPartName[target.UserId] = nil
-        lastPartCycleTime[target.UserId] = nil
+        local uid = target.UserId
+        lockedPartName[uid]      = nil
+        lastPartCycleTime[uid]   = nil
+        partCycleIndex[uid]      = nil
+        prevLockedPartName[uid]  = nil
+        partTransitionStart[uid] = nil
     end
     getgenv().CamlockTarget = nil
     updateXBtn(false)
@@ -1200,9 +1287,13 @@ local function handleLockToggle()
         local target = getPlayerInCrosshair()
         if target and target ~= LocalPlayer then
             getgenv().CamlockTarget = target
-            trackingState[target.UserId] = nil
-            lockedPartName[target.UserId] = nil
-            lastPartCycleTime[target.UserId] = nil
+            local uid = target.UserId
+            trackingState[uid]      = nil
+            lockedPartName[uid]     = nil
+            lastPartCycleTime[uid]  = nil
+            partCycleIndex[uid]     = nil
+            prevLockedPartName[uid] = nil
+            partTransitionStart[uid] = nil
             updateXBtn(true)
         end
     end
@@ -1210,7 +1301,13 @@ end
 
 if IS_MOBILE and xBtn then
     xBtn.MouseButton1Click:Connect(function()
-        triplePress("x_btn", handleLockToggle)
+        -- Isolated actionId — never shares state with x_key_pc.
+        -- After a successful toggle the tracker entry is cleared so the
+        -- next press always starts from count=1 (no permanent throttle).
+        triplePress("x_btn_mobile", function()
+            handleLockToggle()
+            pressTracker["x_btn_mobile"] = nil
+        end)
     end)
 end
 
@@ -1257,9 +1354,13 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
             local autoTarget = getAutoLockTarget()
             if autoTarget then
                 if getgenv().CamlockTarget ~= autoTarget then
-                    trackingState[autoTarget.UserId] = nil
-                    lockedPartName[autoTarget.UserId] = nil
-                    lastPartCycleTime[autoTarget.UserId] = nil
+                    local uid = autoTarget.UserId
+                    trackingState[uid]       = nil
+                    lockedPartName[uid]      = nil
+                    lastPartCycleTime[uid]   = nil
+                    partCycleIndex[uid]      = nil
+                    prevLockedPartName[uid]  = nil
+                    partTransitionStart[uid] = nil
                 end
                 getgenv().CamlockTarget = autoTarget
                 updateXBtn(true)
@@ -1318,42 +1419,37 @@ RunService:BindToRenderStep("DemigodCamlock", Enum.RenderPriority.Camera.Value +
     Camera.CFrame = CFrame.new(camPos, camPos + newLook)
 end)
 
+-- Mobile Mouse Lock removed entirely per request.
+-- DemigodMobileMouseLock render step not bound.
+pcall(function() RunService:UnbindFromRenderStep("DemigodMobileMouseLock") end)
+
 -- =============================================
--- MOBILE MOUSE LOCK — V, thumb-drag visual toward target
+-- MC — MOUSE CAMLOCK (PC only)
+-- When MouseCamlockEnabled, left-click acquires the nearest eligible
+-- target to the cursor position instead of requiring X.
+-- Right-click releases. Toggled by M key.
 -- =============================================
-if IS_MOBILE then
-    pcall(function() RunService:UnbindFromRenderStep("DemigodMobileMouseLock") end)
+if not IS_MOBILE then
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if not getgenv().MouseCamlockEnabled then return end
+        if gameProcessed then return end
+        if isTyping() then return end
 
-    RunService:BindToRenderStep("DemigodMobileMouseLock", Enum.RenderPriority.Camera.Value + 2, function(dt)
-        if not getgenv().MobileMouseLockEnabled then return end
-        local target = getgenv().CamlockTarget
-        local icon = getgenv()._thumbIcon
-        local shadow = getgenv()._thumbShadow
-        if not target or not target.Character or not icon then return end
-
-        local hrp = target.Character:FindFirstChild("HumanoidRootPart")
-        if not hrp or not hrp:IsDescendantOf(workspace) then return end
-        local hum = target.Character:FindFirstChildOfClass("Humanoid")
-
-        local aimPoint = getAimPoint(target.Character, hum, target.UserId, dt)
-        if not aimPoint then return end
-
-        local screenPos, onScreen = Camera:WorldToViewportPoint(aimPoint)
-        if onScreen then
-            -- Thumb icon slides toward the target's screen position,
-            -- shadow trails slightly behind for a physical drag feel
-            local currentPos = icon.Position
-            local targetUDim = UDim2.new(0, screenPos.X, 0, screenPos.Y)
-            local alpha = 1 - math.exp(-14 * dt)
-
-            local currentX = currentPos.X.Offset
-            local currentY = currentPos.Y.Offset
-            local newX = currentX + (screenPos.X - currentX) * alpha
-            local newY = currentY + (screenPos.Y - currentY) * alpha
-
-            icon.Position = UDim2.new(0, newX, 0, newY)
-            if shadow then
-                shadow.Position = UDim2.new(0, newX + 3, 0, newY + 4)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            -- Acquire: pick the player closest to crosshair, same as X
+            if not getgenv().CamlockTarget then
+                local target = getPlayerInCrosshair()
+                if target and target ~= LocalPlayer then
+                    getgenv().CamlockTarget = target
+                    trackingState[target.UserId] = nil
+                    lockedPartName[target.UserId] = nil
+                    lastPartCycleTime[target.UserId] = nil
+                end
+            end
+        elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+            -- Right-click releases current lock when MC is active
+            if getgenv().CamlockTarget then
+                releaseTarget()
             end
         end
     end)
@@ -1484,11 +1580,24 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if isTyping() then return end
 
     if input.KeyCode == Enum.KeyCode.X then
-        triplePress("x_key", handleLockToggle)
+        -- PC only — isolated actionId prevents mobile xBtn presses from
+        -- corrupting this counter (shared "x_key"/"x_btn" was the bug)
+        triplePress("x_key_pc", handleLockToggle)
     elseif input.KeyCode == Enum.KeyCode.C then
         triplePress("c_key", toggleHitboxVisibility)
     elseif input.KeyCode == Enum.KeyCode.Semicolon then
         triplePress("semicolon_key", toggleHitboxVisibility)
+    elseif input.KeyCode == Enum.KeyCode.RightBracket then
+        -- ] — swap to real game hitbox sizes (no expander). Re-press to restore expanded.
+        triplePress("bracket_key", toggleOriginalHitbox)
+    elseif input.KeyCode == Enum.KeyCode.M then
+        -- M — PC only. Toggle Mouse Camlock. Left-click then acquires target under cursor.
+        if not IS_MOBILE then
+            triplePress("m_key", function()
+                getgenv().MouseCamlockEnabled = not getgenv().MouseCamlockEnabled
+                notify("Mouse Camlock", getgenv().MouseCamlockEnabled and "ON — click to lock" or "OFF", 2)
+            end)
+        end
     elseif input.KeyCode == Enum.KeyCode.Z then
         triplePress("z_key", function()
             getgenv().WallCheckEnabled = not getgenv().WallCheckEnabled
@@ -1532,10 +1641,14 @@ local function setupPlayer(player)
         task.wait(0.5)
         applyHitbox(player)
         setupHealthWatch(player)
-        trackingState[player.UserId] = nil
-        anomalyCache[player.UserId] = nil
-        lockedPartName[player.UserId] = nil
-        lastPartCycleTime[player.UserId] = nil
+        local uid = player.UserId
+        trackingState[uid]       = nil
+        anomalyCache[uid]        = nil
+        lockedPartName[uid]      = nil
+        lastPartCycleTime[uid]   = nil
+        partCycleIndex[uid]      = nil
+        prevLockedPartName[uid]  = nil
+        partTransitionStart[uid] = nil
     end)
 end
 
@@ -1557,11 +1670,14 @@ Players.PlayerRemoving:Connect(function(player)
         healthConnections[userId]:Disconnect()
         healthConnections[userId] = nil
     end
-    pendingRelock[userId] = nil
-    trackingState[userId] = nil
-    anomalyCache[userId] = nil
-    lockedPartName[userId] = nil
-    lastPartCycleTime[userId] = nil
+    pendingRelock[userId]       = nil
+    trackingState[userId]       = nil
+    anomalyCache[userId]        = nil
+    lockedPartName[userId]      = nil
+    lastPartCycleTime[userId]   = nil
+    partCycleIndex[userId]      = nil
+    prevLockedPartName[userId]  = nil
+    partTransitionStart[userId] = nil
     notifiedCarries[userId] = nil
     getgenv().Whitelist[userId] = nil
     if getgenv().CamlockTarget == player then releaseTarget() end
@@ -1581,6 +1697,6 @@ rebuildAutoLockGui()
 updateXBtn(false)
 updateCBtn()
 updateZBtn()
-updateVBtn()
-notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | X: Lock | V: Mouse Lock | C or ;: Visibility | Z: Wall | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
+updateBracketBtn()
+notify("Demigod 🌟", "Mode: " .. getgenv().ScriptMode .. " | X: Lock | C or ;: Hitbox Vis | Z: Wall | ]: Original Hitbox | J: Whitelist | K: Auto-Lock | P x3: Safe Mode", 6)
 print("Demigod script loaded — Mode: " .. getgenv().ScriptMode)
