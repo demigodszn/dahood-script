@@ -108,15 +108,15 @@ local LOCAL_HEALTH_GATE = 15
 local MAX_HEALTH = 100
 local TRIPLE_PRESS_WINDOW = 1.0
 
-local VELOCITY_SMOOTH_RATE = 8.0
-local LOOK_SMOOTH_RATE = 16.0
-local LOOK_JITTER_MAG = 0.015
+local VELOCITY_SMOOTH_RATE = 12.0   -- was 8.0 — responds faster to target velocity changes
+local LOOK_SMOOTH_RATE     = 28.0   -- was 16.0 — camera follows aim point with much less lag
+local LOOK_JITTER_MAG      = 0.015
+local PART_TRANSITION_DURATION = 0.06  -- was 0.12 — part cycle blend snaps twice as fast
 local LEAD_TIME = 0.12
 local JUMP_VEL_THRESHOLD = 18
-local JUMP_SNAP_RATE = 26.0 * 0.95
+local JUMP_SNAP_RATE       = 44.0   -- was 26.0 * 0.95 — snaps harder during jump pool switch
 local JUMP_SNAP_DURATION = 0.35
-local PART_CYCLE_INTERVAL      = 0.35  -- time per part in the body-scan cycle (16 parts → ~5.6s full loop)
-local PART_TRANSITION_DURATION = 0.12  -- smoothstep blend duration between consecutive parts
+local PART_CYCLE_INTERVAL      = 0.35  -- time per part in the body-scan cycle
 
 local MACRO_SPEED_MULT = 1.15
 local CFRAME_ACCEL_SPIKE = 500
@@ -843,6 +843,9 @@ local function applyHitbox(player)
     if not getgenv().Enabled or player == LocalPlayer then return end
     if getgenv().Whitelist[player.UserId] then return end
     if not player.Character then return end
+    -- When the hitbox expander is off, leave every character at real game sizes.
+    -- This covers new joiners, rejoins, and respawns without any per-site guards.
+    if getgenv().OriginalHitboxActive then return end
 
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if humanoid and humanoid.Health <= KNOCK_THRESHOLD then return end
@@ -1314,6 +1317,15 @@ local function handleLockToggle()
     if isTyping() then return end
     if getgenv().CamlockTarget then
         releaseTarget()
+        -- AutoLock re-acquires a target every render frame when enabled.
+        -- If we don't also disable it here, C releases for one frame then
+        -- AutoLock immediately re-locks — making C appear completely broken.
+        if getgenv().AutoLockEnabled then
+            getgenv().AutoLockEnabled = false
+            alEnableBtn.Text = "Auto-Lock: OFF"
+            alEnableBtn.BackgroundColor3 = Color3.fromRGB(90, 80, 60)
+            alStatusLabel.Text = "Off"
+        end
     else
         local target = getPlayerInCrosshair()
         if target and target ~= LocalPlayer then
