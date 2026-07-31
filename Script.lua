@@ -79,27 +79,27 @@ getgenv().SafeMode = false
 -- MC (Mouse Camlock) — PC only. M key toggles. Left-click acquires target under cursor.
 getgenv().MouseCamlockEnabled = false
 
--- Ordered R16 body-scan sequence — anatomically adjacent entries so
--- every transition is a short spatial hop, never a full-body teleport.
--- Pattern: head → left arm sweep down → center torso → right arm sweep up →
---          left leg sweep down → right leg sweep up → back to head.
-local CYCLE_PART_POOL = {
+-- GROUND pool — target is standing/running. Tight center-mass grouping.
+local GROUND_PART_POOL = {
     "Head",
     "UpperTorso",
+    "HumanoidRootPart",
+    "LeftUpperArm",
+    "RightUpperArm",
+}
+
+-- JUMP pool — target is airborne. Left-side sweep so tracking follows the
+-- natural arc of a jumping player without chasing the right side blindly.
+local JUMP_PART_POOL = {
+    "Head",
+    "HumanoidRootPart",
+    "UpperTorso",
+    "LowerTorso",
     "LeftUpperArm",
     "LeftLowerArm",
     "LeftHand",
-    "LowerTorso",
-    "HumanoidRootPart",
-    "RightHand",
-    "RightLowerArm",
-    "RightUpperArm",
     "LeftUpperLeg",
     "LeftLowerLeg",
-    "LeftFoot",
-    "RightFoot",
-    "RightLowerLeg",
-    "RightUpperLeg",
 }
 
 local KNOCK_THRESHOLD = 2
@@ -144,9 +144,10 @@ local pendingRelock = {}
 local trackingState = {}
 local lockedPartName = {}       -- current part name in the cycle
 local lastPartCycleTime = {}    -- tick() when cycle last advanced
-local partCycleIndex = {}       -- which index in CYCLE_PART_POOL we're currently on
+local partCycleIndex = {}       -- which index in the active pool we're currently on
 local prevLockedPartName = {}   -- part name we're blending away from
 local partTransitionStart = {}  -- tick() when the current blend started
+local jumpStateCache = {}       -- [userId] = bool: last known jump state for pool-switch detection
 local originalPartSizes = {}    -- [userId] = Vector3: actual in-game TargetPart size before we expand it
 
 local function getTrackingState(userId)
@@ -386,6 +387,43 @@ if IS_MOBILE then
     makeDraggable(emoteBtn)
 
     -- Thumb-drag visuals removed — mobile mouse lock excised entirely
+end
+
+-- PC ghost button — if IS_MOBILE was false, xBtn was never created above,
+-- so the "if xBtn then" handler later in the script would silently skip.
+-- This block creates xFrame/xBtn/xDot unconditionally when they don't exist yet,
+-- keeping them invisible on PC (keyboard C handles locking) but ensuring the
+-- handler always connects regardless of how mode was detected.
+if not xFrame then
+    xFrame = Instance.new("Frame")
+    xFrame.Size = UDim2.new(0, 50, 0, 50)
+    xFrame.Position = UDim2.new(0.5, -80, 1, -120)
+    xFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    xFrame.BackgroundTransparency = 0.3
+    xFrame.Active = true
+    xFrame.ZIndex = 20
+    xFrame.Visible = false  -- invisible on PC; keyboard C still handles locking
+    xFrame.Parent = screenGui
+    Instance.new("UICorner", xFrame).CornerRadius = UDim.new(1, 0)
+
+    xBtn = Instance.new("TextButton")
+    xBtn.Size = UDim2.new(1, 0, 1, 0)
+    xBtn.BackgroundTransparency = 1
+    xBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    xBtn.Text = "C"
+    xBtn.Font = Enum.Font.GothamBold
+    xBtn.TextSize = 22
+    xBtn.Active = true
+    xBtn.ZIndex = 21
+    xBtn.Parent = xFrame
+
+    xDot = Instance.new("Frame")
+    xDot.Size = UDim2.new(0, 10, 0, 10)
+    xDot.Position = UDim2.new(1, -2, 0, -2)
+    xDot.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+    xDot.ZIndex = 22
+    xDot.Parent = xFrame
+    Instance.new("UICorner", xDot).CornerRadius = UDim.new(1, 0)
 end
 
 local function fireEmoteMenu()
@@ -1100,28 +1138,39 @@ local function updateTrackingState(userId, refPart, humanoid, dt)
     return state
 end
 
--- Sequential body-scan: advances through CYCLE_PART_POOL in order every
--- PART_CYCLE_INTERVAL seconds. During the first PART_TRANSITION_DURATION
--- of each interval the aim point smoothstep-blends from the previous part
--- to the new one, so every "snap" is actually an S-curve glide.
+-- Dual-pool targeting: GROUND_PART_POOL when standing, JUMP_PART_POOL when airborne.
+-- Pool switches immediately on jump-state change (lastPartCycleTime expired) so the
+-- camera moves to left-side parts the moment a jump is detected.
+-- Cycle index persists across locks — different entry point every engagement.
 local function getAimPoint(character, humanoid, userId, dt)
     local now = tick()
-    local poolSize = #CYCLE_PART_POOL
 
-    -- Advance cycle index when the current interval expires
+    -- Peek at previous frame's jump state (jumpSnapUntil defaults to 0 → not jumping)
+    local prevState  = getTrackingState(userId)
+    local isJumping  = now < prevState.jumpSnapUntil
+    local activePool = isJumping and JUMP_PART_POOL or GROUND_PART_POOL
+    local poolSize   = #activePool
+
+    -- Force immediate cycle advance when jump state flips
+    local wasJumping = jumpStateCache[userId]
+    if wasJumping ~= isJumping then
+        jumpStateCache[userId]    = isJumping
+        lastPartCycleTime[userId] = nil  -- expire interval so next block runs immediately
+    end
+
+    -- Advance cycle when interval expires
     if not lastPartCycleTime[userId] or (now - lastPartCycleTime[userId]) >= PART_CYCLE_INTERVAL then
         local prevIdx  = partCycleIndex[userId] or 0
-        -- Skip parts the character doesn't have (some R16 rigs drop extremities)
         local nextIdx  = prevIdx
         local attempts = 0
         repeat
             nextIdx  = (nextIdx % poolSize) + 1
             attempts = attempts + 1
-        until character:FindFirstChild(CYCLE_PART_POOL[nextIdx]) or attempts > poolSize
+        until character:FindFirstChild(activePool[nextIdx]) or attempts > poolSize
 
         prevLockedPartName[userId]  = lockedPartName[userId]
         partCycleIndex[userId]      = nextIdx
-        lockedPartName[userId]      = CYCLE_PART_POOL[nextIdx]
+        lockedPartName[userId]      = activePool[nextIdx]
         partTransitionStart[userId] = now
         lastPartCycleTime[userId]   = now
     end
@@ -1140,17 +1189,14 @@ local function getAimPoint(character, humanoid, userId, dt)
 
     local curPos = curPart.Position + (state.smoothedVelocity * leadTime)
 
-    local now2        = tick()
+    local now2         = tick()
     local inSnapWindow = now2 < state.jumpSnapUntil
 
-    -- Smoothstep S-curve blend from previous part position during transition window.
-    -- rawAlpha 0→1 over PART_TRANSITION_DURATION; smoothstep gives an ease-in-out curve.
-    -- BYPASSED when inSnapWindow — the blend dampens the snap if left active,
-    -- so we pass the raw aim point straight through and let JUMP_SNAP_RATE handle it.
+    -- Smoothstep blend from previous part — bypassed during jump snap window
     if not inSnapWindow then
         local transAge   = now2 - (partTransitionStart[userId] or now2)
         local rawAlpha   = math.min(transAge / PART_TRANSITION_DURATION, 1.0)
-        local blendAlpha = rawAlpha * rawAlpha * (3.0 - 2.0 * rawAlpha)  -- smoothstep
+        local blendAlpha = rawAlpha * rawAlpha * (3.0 - 2.0 * rawAlpha)
 
         if blendAlpha < 1.0 then
             local prevName = prevLockedPartName[userId]
@@ -1258,6 +1304,7 @@ local function releaseTarget()
         partCycleIndex[uid]      = nil
         prevLockedPartName[uid]  = nil
         partTransitionStart[uid] = nil
+        jumpStateCache[uid]      = nil
     end
     getgenv().CamlockTarget = nil
     updateXBtn(false)
@@ -1635,6 +1682,7 @@ local function setupPlayer(player)
         partCycleIndex[uid]      = nil
         prevLockedPartName[uid]  = nil
         partTransitionStart[uid] = nil
+        jumpStateCache[uid]      = nil
         originalPartSizes[uid]   = nil  -- re-capture actual size on next applyHitbox
     end)
 end
@@ -1665,6 +1713,7 @@ Players.PlayerRemoving:Connect(function(player)
     partCycleIndex[userId]      = nil
     prevLockedPartName[userId]  = nil
     partTransitionStart[userId] = nil
+    jumpStateCache[userId]      = nil
     originalPartSizes[userId]   = nil
     notifiedCarries[userId] = nil
     getgenv().Whitelist[userId] = nil
